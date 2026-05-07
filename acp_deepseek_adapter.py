@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-ACP → DeepSeek TUI Adapter  v3.0
+ACP → DeepSeek TUI Adapter  v3.1
 =================================
 Bridges cc-connect's ACP (JSON-RPC 2.0 over stdio) to deepseek-tui.
 
-Verified against: deepseek-tui v0.8.16 (2026-05-08)
+Verified against:
+  - deepseek-tui v0.8.16 (2026-05-08)
+  - ACP spec: session/prompt deferred response with stopReason
   - deepseek exec "prompt"              → agent mode with tools (read_file, exec_shell, etc.)
   - deepseek exec --auto "prompt"       → agent mode + auto-approve all tools
   - deepseek exec --json "prompt"       → one-shot mode, NO tools (do NOT use)
@@ -23,6 +25,7 @@ Environment variables:
 
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -50,6 +53,9 @@ DEEPSEEK_WORKDIR = os.environ.get("DEEPSEEK_WORKDIR", "/Users/rk")
 
 
 # ── JSON-RPC 2.0 Transport ──────────────────────────────────────────
+# Sentinel for deferred JSON-RPC responses (ACP session/prompt)
+DEFERRED = object()
+
 class JSONRPCTransport:
     """Newline-delimited JSON-RPC 2.0 over stdin/stdout."""
 
@@ -58,6 +64,7 @@ class JSONRPCTransport:
         self._handlers: Dict[str, callable] = {}
         self._notif_handlers: Dict[str, callable] = {}
         self._running = True
+        self._current_req_id: Any = None  # set by _dispatch before handler call
 
     def register(self, method: str, handler):
         self._handlers[method] = handler
@@ -118,8 +125,10 @@ class JSONRPCTransport:
                 self.respond(req_id, error={"code": -32601, "message": f"Method not found: {method}"})
                 return
             try:
+                self._current_req_id = req_id
                 result = handler(params)
-                self.respond(req_id, result=result)
+                if result is not DEFERRED:
+                    self.respond(req_id, result=result)
             except Exception as e:
                 log.error(f"Handler error ({method}): {e}", exc_info=True)
                 self.respond(req_id, error={"code": -32603, "message": str(e)})
@@ -127,6 +136,12 @@ class JSONRPCTransport:
 
     def stop(self):
         self._running = False
+
+    def wait_pending(self, handlers=None):
+        """Wait for pending execution threads (ACP session/prompt)."""
+        if handlers and hasattr(handlers, '_exec_threads'):
+            for t in handlers._exec_threads:
+                t.join(timeout=30)
 
 
 # ── Session State ────────────────────────────────────────────────────
@@ -180,11 +195,14 @@ class DeepSeekBackend:
         """
         cmd = [self._bin, "exec"]
 
-        if session.mode == "yolo":
-            cmd.append("--auto")
+        # exec mode has no TTY for interactive approval → always use --auto
+        # The user controls safety via cc-connect /mode (default/yolo both map to --auto here)
+        cmd.append("--auto")
 
-        if session.deepseek_thread_id:
-            cmd.extend(["--resume", session.deepseek_thread_id])
+        # deepseek exec does NOT support --resume (verified v0.8.16)
+        # Session continuity is not possible in exec mode.
+        # if session.deepseek_thread_id:
+        #     cmd.extend(["--resume", session.deepseek_thread_id])
 
         cmd.append(prompt)
         return cmd
@@ -199,17 +217,43 @@ class DeepSeekBackend:
 
     def _stream_output(self, process: subprocess.Popen, session_id: str):
         import re
+        # deepseek exec output formats:
+        #   tool: <name> (<params>)
+        #   tool <name> completed: <inline_result>
+        #   tool <name> completed                 (no colon → multi-line result follows)
         tool_start_pat = re.compile(r"^tool:\s+(\S+)\s*\((.*)\)\s*$")
-        tool_done_pat = re.compile(r"^tool\s+(\S+)\s+completed:\s*(.*)$")
+        tool_done_pat = re.compile(r"^tool\s+(\S+)\s+completed(?::\s*(.*))?\s*$")
 
         # Track current tool call for matching completion
         current_tool_id: Optional[str] = None
+        # Multi-line tool result buffering (for "completed" without colon)
+        _result_buf: Optional[list] = None
+        _result_tool_id: Optional[str] = None
+        _result_tool_name: Optional[str] = None
 
         try:
             for line in process.stdout:
                 line = line.rstrip("\n").rstrip("\r")
                 if not line:
+                    # blank line while buffering → keep in result
+                    if _result_buf is not None:
+                        _result_buf.append("")
                     continue
+
+                # If we're buffering multi-line tool result
+                if _result_buf is not None:
+                    # Check if this is a new tool call → flush buffer
+                    if tool_start_pat.match(line):
+                        self._emit_tool_done_text(session_id, _result_tool_id,
+                                                  _result_tool_name,
+                                                  "\n".join(_result_buf))
+                        _result_buf = None
+                        _result_tool_id = None
+                        _result_tool_name = None
+                        # fall through to process this tool: line
+                    else:
+                        _result_buf.append(line)
+                        continue
 
                 # Detect tool call start
                 m = tool_start_pat.match(line)
@@ -225,15 +269,27 @@ class DeepSeekBackend:
                 m = tool_done_pat.match(line)
                 if m:
                     tool_name = m.group(1)
-                    tool_result = m.group(2)
+                    tool_result = m.group(2)  # None when no colon (multi-line)
                     tid = current_tool_id or self._next_tool_id()
+                    current_tool_id = None
+                    if tool_result is None:
+                        # Enter buffering mode for multi-line tool output
+                        _result_buf = []
+                        _result_tool_id = tid
+                        _result_tool_name = tool_name
+                        continue
                     self._emit_tool_done_text(session_id, tid,
                                               tool_name, tool_result)
-                    current_tool_id = None
                     continue
 
                 # Plain text → emit as assistant message chunk
                 self._emit_text(session_id, line)
+
+            # Flush any remaining buffered result
+            if _result_buf is not None:
+                self._emit_tool_done_text(session_id, _result_tool_id,
+                                          _result_tool_name,
+                                          "\n".join(_result_buf))
         except Exception as e:
             log.error(f"Stream error: {e}")
 
@@ -292,6 +348,18 @@ class DeepSeekBackend:
                 env={**os.environ, "HOME": os.path.expanduser("~")},
             )
 
+            # Drain stderr separately — log it, don't mix into stdout parsing
+            def _drain_stderr():
+                for line in process.stderr:
+                    line = line.rstrip()
+                    if line:
+                        log.warning(f"[deepseek stderr] {line}")
+
+            stderr_thread = threading.Thread(
+                target=_drain_stderr, daemon=True
+            )
+            stderr_thread.start()
+
             stream_thread = threading.Thread(
                 target=self._stream_output,
                 args=(process, session.id),
@@ -307,10 +375,8 @@ class DeepSeekBackend:
                 return {"status": "timeout", "exitCode": -1}
 
             stream_thread.join(timeout=10)
+            stderr_thread.join(timeout=5)
 
-            stderr_output = process.stderr.read()
-            if stderr_output:
-                log.warning(f"deepseek stderr: {stderr_output[:500]}")
             if returncode != 0:
                 self._emit_text(session.id, f"\n[退出码: {returncode}]\n")
 
@@ -367,8 +433,16 @@ class DeepSeekBackend:
             sessions = []
             for line in stdout.strip().split("\n"):
                 parts = line.split()
-                if parts and len(parts[0]) > 8:
-                    sessions.append({"id": parts[0]})
+                if not parts:
+                    continue
+                # Find the first hex-like token on the line (length >= 8).
+                # This handles "* 284d7e7e | ..." (bullet prefix) and
+                # "7907734d | ..." (no prefix), while rejecting prose like
+                # "Continue", "Saved", "Resume", separator lines, etc.
+                for word in parts:
+                    if re.match(r'^[0-9a-f-]{8,}$', word):
+                        sessions.append({"id": word})
+                        break
             return sessions
 
     @staticmethod
@@ -415,7 +489,7 @@ class ACPHandlers:
             },
             "serverInfo": {
                 "name": "deepseek-tui-acp-adapter",
-                "version": "3.0.0",
+                "version": "3.1.0",
             },
             "modes": {
                 "availableModes": self.backend.MODES,
@@ -458,7 +532,8 @@ class ACPHandlers:
         }
 
     # ── session/prompt ────────────────────────────────────────────
-    def handle_session_prompt(self, params: dict) -> dict:
+    def handle_session_prompt(self, params: dict):
+        """ACP session/prompt — deferred response with stopReason (spec §4)."""
         sid = params.get("sessionId", "")
         prompt_blocks = params.get("prompt", [])
 
@@ -470,7 +545,7 @@ class ACPHandlers:
                 prompt_text += block
 
         if not prompt_text.strip():
-            return {"error": "empty prompt"}
+            return {"stopReason": "end_turn"}
 
         s = self.sessions.get(sid)
         if not s:
@@ -479,14 +554,23 @@ class ACPHandlers:
 
         log.info(f"session/prompt: sid={sid}, len={len(prompt_text)}")
 
-        def run():
-            try:
-                self.backend.execute(prompt_text, s)
-            except Exception as e:
-                log.error(f"Prompt error: {e}", exc_info=True)
-
-        threading.Thread(target=run, daemon=True).start()
-        return {"status": "processing", "sessionId": sid}
+        # Execute synchronously — execute() blocks until deepseek finishes,
+        # streaming session/update notifications for text and tool calls along the way.
+        try:
+            result = self.backend.execute(prompt_text, s)
+            status = result.get("status", "error")
+            if status == "completed":
+                log.info(f"session/prompt done: sid={sid}, stopReason=end_turn")
+                return {"stopReason": "end_turn"}
+            elif status == "timeout":
+                return {"stopReason": "max_turn_requests"}
+            else:
+                return {"stopReason": "end_turn",
+                        "error": result.get("message", "execution failed")}
+        except Exception as e:
+            log.error(f"Prompt error: {e}", exc_info=True)
+            return {"stopReason": "end_turn",
+                    "error": str(e)}
 
     # ── session/set_mode ──────────────────────────────────────────
     def handle_session_set_mode(self, params: dict) -> dict:
@@ -518,7 +602,7 @@ class ACPHandlers:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info(f"ACP → DeepSeek TUI Adapter v3.0.0")
+    log.info(f"ACP → DeepSeek TUI Adapter v3.1.0")
     log.info(f"  DEEPSEEK_BIN={DEEPSEEK_BIN}")
     log.info(f"  DEEPSEEK_WORKDIR={DEEPSEEK_WORKDIR}")
     log.info("=" * 60)
@@ -546,6 +630,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        log.info("Waiting for pending executions...")
+        transport.wait_pending(handlers)
         log.info("Adapter shut down.")
 
 
