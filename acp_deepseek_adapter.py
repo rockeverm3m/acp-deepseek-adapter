@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ACP → DeepSeek TUI Adapter  v3.2
+ACP → DeepSeek TUI Adapter  v3.3
 =================================
 Bridges cc-connect's ACP (JSON-RPC 2.0 over stdio) to deepseek-tui.
 
@@ -455,6 +455,26 @@ class DeepSeekBackend:
 
     # ── Context usage ────────────────────────────────────────────
     _CONTEXT_WINDOW_TOKENS = 1_000_000  # deepseek-v4-pro 1M window
+    _compact_threshold: Optional[float] = None  # cached from config
+
+    @classmethod
+    def _read_compact_threshold(cls) -> Optional[float]:
+        """Read auto_compact_threshold from ~/.deepseek/config.toml (cached)."""
+        if cls._compact_threshold is not None:
+            return cls._compact_threshold
+        config_path = os.path.expanduser("~/.deepseek/config.toml")
+        try:
+            with open(config_path, 'r') as fh:
+                for line in fh:
+                    # TOML: key = "value"  or  key = value
+                    m = re.match(r'^(?:auto_compact_threshold|compact_auto_threshold)\s*=\s*"?([0-9.]+)"?', line)
+                    if m:
+                        cls._compact_threshold = float(m.group(1))
+                        return cls._compact_threshold
+        except Exception:
+            pass
+        cls._compact_threshold = 0.5  # default
+        return cls._compact_threshold
 
     def _get_context_usage(self, session: Session) -> Optional[str]:
         """Read latest session file and compute approximate context usage %."""
@@ -473,7 +493,8 @@ class DeepSeekBackend:
                 data = json.load(fh)
             total = data.get("metadata", {}).get("total_tokens", 0)
             pct = min(int(total * 100 / self._CONTEXT_WINDOW_TOKENS), 99)
-            return f"[ctx: ~{pct}%]"
+            threshold_pct = int(self._read_compact_threshold() * 100)
+            return f"[ctx: ~{pct}% | compact@{threshold_pct}%]"
         except Exception as e:
             log.debug(f"context usage read failed: {e}")
             return None
@@ -522,7 +543,7 @@ class ACPHandlers:
             },
             "serverInfo": {
                 "name": "deepseek-tui-acp-adapter",
-                "version": "3.2.0",
+                "version": "3.3.0",
             },
             "modes": {
                 "availableModes": self.backend.MODES,
@@ -585,6 +606,18 @@ class ACPHandlers:
             s = self.sessions.create()
             sid = s.id
 
+        # Handle /compact slash command locally (no deepseek exec needed)
+        stripped = prompt_text.strip()
+        if stripped.startswith('/compact'):
+            ctx_info = self.backend._get_context_usage(s)
+            threshold_pct = int(self.backend._read_compact_threshold() * 100)
+            self.backend._emit_text(sid,
+                f"自动压缩已启用 (阈值 {threshold_pct}%)。"
+                f"{ctx_info or ''}\n"
+                f"压缩会在上下文超过 {threshold_pct}% 时自动触发。")
+            log.info(f"session/prompt: /compact handled locally")
+            return {"stopReason": "end_turn"}
+
         log.info(f"session/prompt: sid={sid}, len={len(prompt_text)}")
 
         # Execute synchronously — execute() blocks until deepseek finishes,
@@ -635,7 +668,7 @@ class ACPHandlers:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info(f"ACP → DeepSeek TUI Adapter v3.2.0")
+    log.info(f"ACP → DeepSeek TUI Adapter v3.3.0")
     log.info(f"  DEEPSEEK_BIN={DEEPSEEK_BIN}")
     log.info(f"  DEEPSEEK_WORKDIR={DEEPSEEK_WORKDIR}")
     log.info("=" * 60)
