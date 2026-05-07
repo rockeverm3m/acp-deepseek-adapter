@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ACP → DeepSeek TUI Adapter  v3.5
+ACP → DeepSeek TUI Adapter  v3.6
 =================================
 Bridges cc-connect's ACP (JSON-RPC 2.0 over stdio) to deepseek-tui.
 
@@ -151,6 +151,8 @@ class Session:
         self.work_dir = work_dir
         self.deepseek_thread_id: Optional[str] = None
         self.mode = "default"
+        self.model = "deepseek-v4-pro"  # default model
+        self.dir_history: List[str] = []  # for /dir - (previous dir)
         self.created_at: float = time.time()
 
 
@@ -182,6 +184,11 @@ class DeepSeekBackend:
         {"id": "yolo",   "name": "YOLO",    "description": "自动批准所有操作 (谨慎使用)"},
     ]
 
+    MODELS = [
+        {"value": "deepseek-v4-pro",   "name": "V4 Pro",   "description": "最强模型"},
+        {"value": "deepseek-v4-flash", "name": "V4 Flash", "description": "快速模型"},
+    ]
+
     def __init__(self, transport: JSONRPCTransport):
         self.transport = transport
         self._bin = DEEPSEEK_BIN
@@ -194,7 +201,13 @@ class DeepSeekBackend:
 
         NO --json flag — that switches to one-shot mode without tools.
         """
-        cmd = [self._bin, "exec"]
+        cmd = [self._bin]
+
+        # Model selection via --model flag (verified with v0.8.16)
+        if session.model and session.model != "deepseek-v4-pro":
+            cmd.extend(["--model", session.model])
+
+        cmd.append("exec")
 
         # exec mode has no TTY for interactive approval → always use --auto
         # The user controls safety via cc-connect /mode (default/yolo both map to --auto here)
@@ -389,13 +402,10 @@ class DeepSeekBackend:
 
             self._discover_thread_id(session)
 
-            # Emit response size indicator
+            # Emit context usage estimate [ctx: ~X%]
             est_tokens = max(1, self._response_chars // 2)
-            if est_tokens >= 1000:
-                size_str = f"{est_tokens/1000:.1f}K"
-            else:
-                size_str = str(est_tokens)
-            self._emit_text(session.id, f"[~{size_str} tokens]")
+            pct = min(est_tokens * 100 // 1_000_000, 99)
+            self._emit_text(session.id, f"[ctx: ~{pct}%]")
 
             return {"status": "completed", "exitCode": returncode}
 
@@ -537,6 +547,35 @@ class ACPHandlers:
         self.backend = DeepSeekBackend(transport)
         self.sessions = SessionManager()
 
+    # ── helpers ───────────────────────────────────────────────────
+    def _config_options(self, session=None) -> list:
+        mode_id = session.mode if session else "default"
+        model_id = session.model if session else "deepseek-v4-pro"
+        return [
+            {"id": "mode", "name": "权限模式", "category": "mode", "type": "select",
+             "currentValue": mode_id, "options": self.backend.MODES},
+            {"id": "model", "name": "模型", "category": "model", "type": "select",
+             "currentValue": model_id, "options": self.backend.MODELS},
+        ]
+
+    def _advertise_commands(self, session_id: str):
+        self.transport.send_notification("session/update", {
+            "sessionId": session_id,
+            "update": {
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": [
+                    {"name": "compact", "description": "查看上下文和压缩状态"},
+                    {"name": "dir", "description": "切换工作目录", "input": {"hint": "路径"}},
+                    {"name": "mode", "description": "切换权限模式 (default/yolo)"},
+                    {"name": "model", "description": "切换模型"},
+                    {"name": "new", "description": "新建会话", "input": {"hint": "名称"}},
+                    {"name": "list", "description": "列出所有会话"},
+                    {"name": "current", "description": "查看当前会话"},
+                    {"name": "memory", "description": "读写记忆文件"},
+                ]
+            }
+        })
+
     # ── initialize ────────────────────────────────────────────────
     def handle_initialize(self, params: dict) -> dict:
         return {
@@ -547,12 +586,13 @@ class ACPHandlers:
             },
             "serverInfo": {
                 "name": "deepseek-tui-acp-adapter",
-                "version": "3.5.0",
+                "version": "3.6.0",
             },
             "modes": {
                 "availableModes": self.backend.MODES,
                 "currentModeId": "default",
             },
+            "configOptions": self._config_options(),
         }
 
     # ── authenticate ──────────────────────────────────────────────
@@ -565,6 +605,7 @@ class ACPHandlers:
         if cwd and not os.path.isabs(cwd):
             cwd = os.path.join(DEEPSEEK_WORKDIR, cwd)
         s = self.sessions.create(work_dir=cwd)
+        self._advertise_commands(s.id)
         return {
             "sessionId": s.id,
             "cwd": s.work_dir,
@@ -572,6 +613,7 @@ class ACPHandlers:
                 "availableModes": self.backend.MODES,
                 "currentModeId": s.mode,
             },
+            "configOptions": self._config_options(s),
         }
 
     # ── session/load ──────────────────────────────────────────────
@@ -580,6 +622,7 @@ class ACPHandlers:
         s = self.sessions.get(sid)
         if not s:
             s = self.sessions.create(work_dir=params.get("cwd", DEEPSEEK_WORKDIR))
+        self._advertise_commands(s.id)
         return {
             "sessionId": s.id,
             "cwd": s.work_dir,
@@ -587,6 +630,7 @@ class ACPHandlers:
                 "availableModes": self.backend.MODES,
                 "currentModeId": s.mode,
             },
+            "configOptions": self._config_options(s),
         }
 
     # ── session/prompt ────────────────────────────────────────────
@@ -610,9 +654,13 @@ class ACPHandlers:
             s = self.sessions.create()
             sid = s.id
 
-        # Handle /compact slash command locally (no deepseek exec needed)
+        # Handle slash commands locally
         stripped = prompt_text.strip()
-        if stripped.startswith('/compact'):
+        parts = stripped.split(maxsplit=1)
+        cmd = parts[0] if parts else ""
+        cmd_arg = parts[1] if len(parts) > 1 else ""
+
+        if cmd == '/compact':
             threshold_pct = int(self.backend._read_compact_threshold() * 100)
             info = self.backend._get_session_info()
             msg_count = info.get("message_count", "?") if info else "?"
@@ -620,8 +668,117 @@ class ACPHandlers:
             self.backend._emit_text(sid,
                 f"自动压缩：已启用，阈值 {threshold_pct}%\n"
                 f"当前会话：{title} ({msg_count} 条消息)")
-            log.info(f"session/prompt: /compact handled locally")
             return {"stopReason": "end_turn"}
+
+        elif cmd == '/new':
+            new_s = self.sessions.create(work_dir=s.work_dir if s else DEEPSEEK_WORKDIR)
+            name = cmd_arg or new_s.id
+            self._advertise_commands(new_s.id)
+            self.backend._emit_text(sid,
+                f"新会话已创建\nID: {new_s.id}\n目录: {new_s.work_dir}")
+            return {"stopReason": "end_turn", "sessionId": new_s.id}
+
+        elif cmd == '/list':
+            lines = ["会话列表:"]
+            for sess in self.sessions.list_sessions():
+                marker = "*" if sess.id == sid else " "
+                lines.append(f"  {marker} {sess.id} | {sess.work_dir} | {sess.mode}")
+            if not self.sessions.list_sessions():
+                lines.append("  (无会话)")
+            self.backend._emit_text(sid, "\n".join(lines))
+            return {"stopReason": "end_turn"}
+
+        elif cmd == '/current':
+            self.backend._emit_text(sid,
+                f"会话: {s.id}\n"
+                f"目录: {s.work_dir}\n"
+                f"模式: {s.mode}\n"
+                f"模型: {s.model}")
+            return {"stopReason": "end_turn"}
+
+        elif cmd in ('/dir', '/cd'):
+            if not cmd_arg:
+                self.backend._emit_text(sid, f"当前目录: {s.work_dir}")
+                return {"stopReason": "end_turn"}
+
+            new_dir = cmd_arg
+            # Support /dir - (previous directory)
+            if new_dir == '-' and s.dir_history:
+                new_dir = s.dir_history.pop()
+            elif new_dir == '-':
+                self.backend._emit_text(sid, "没有上一个目录")
+                return {"stopReason": "end_turn"}
+
+            if not os.path.isabs(new_dir):
+                new_dir = os.path.join(s.work_dir, new_dir)
+            new_dir = os.path.normpath(new_dir)
+
+            if not os.path.isdir(new_dir):
+                self.backend._emit_text(sid, f"目录不存在: {new_dir}")
+                return {"stopReason": "end_turn"}
+
+            old_dir = s.work_dir
+            s.dir_history.append(old_dir)
+            s.work_dir = new_dir
+            self.backend._emit_text(sid, f"已切换到: {new_dir}")
+            log.info(f"/dir: {sid} {old_dir} → {new_dir}")
+            return {"stopReason": "end_turn"}
+
+        elif cmd == '/mode':
+            valid = [m["id"] for m in self.backend.MODES]
+            if not cmd_arg:
+                self.backend._emit_text(sid, f"当前模式: {s.mode}\n可选: {', '.join(valid)}")
+                return {"stopReason": "end_turn"}
+            if cmd_arg not in valid:
+                self.backend._emit_text(sid, f"未知模式: {cmd_arg}. 可选: {', '.join(valid)}")
+                return {"stopReason": "end_turn"}
+            s.mode = cmd_arg
+            self.backend._emit_text(sid, f"模式已切换为: {cmd_arg}")
+            return {"stopReason": "end_turn"}
+
+        elif cmd == '/model':
+            valid = [(m["value"], m["name"]) for m in self.backend.MODELS]
+            if not cmd_arg:
+                current_name = next((n for v,n in valid if v == s.model), s.model)
+                names = [f"{v} ({n})" for v,n in valid]
+                self.backend._emit_text(sid, f"当前模型: {current_name}\n可选: {', '.join(names)}")
+                return {"stopReason": "end_turn"}
+            if cmd_arg not in [v for v,_ in valid]:
+                names = ', '.join(v for v,_ in valid)
+                self.backend._emit_text(sid, f"未知模型: {cmd_arg}. 可选: {names}")
+                return {"stopReason": "end_turn"}
+            s.model = cmd_arg
+            name = next((n for v,n in valid if v == cmd_arg), cmd_arg)
+            self.backend._emit_text(sid, f"模型已切换为: {name}")
+            return {"stopReason": "end_turn"}
+
+        elif cmd == '/memory':
+            mem_file = os.path.join(s.work_dir, "AGENTS.md")
+            if not cmd_arg:
+                if os.path.exists(mem_file):
+                    with open(mem_file, 'r') as fh:
+                        content = fh.read()
+                    preview = content[:2000]
+                    more = f"\n... (共 {len(content)} 字符)" if len(content) > 2000 else ""
+                    self.backend._emit_text(sid, f"AGENTS.md:\n{preview}{more}")
+                else:
+                    self.backend._emit_text(sid, "AGENTS.md 不存在。用 /memory add <内容> 创建。")
+                return {"stopReason": "end_turn"}
+
+            subcmd, _, text = cmd_arg.partition(' ')
+            if subcmd == 'add':
+                with open(mem_file, 'a') as fh:
+                    fh.write('\n' + text + '\n')
+                self.backend._emit_text(sid, f"已追加到 AGENTS.md")
+                return {"stopReason": "end_turn"}
+            elif subcmd == 'set':
+                with open(mem_file, 'w') as fh:
+                    fh.write(text + '\n')
+                self.backend._emit_text(sid, f"已覆写 AGENTS.md")
+                return {"stopReason": "end_turn"}
+            else:
+                self.backend._emit_text(sid, "用法: /memory | /memory add <内容> | /memory set <内容>")
+                return {"stopReason": "end_turn"}
 
         log.info(f"session/prompt: sid={sid}, len={len(prompt_text)}")
 
@@ -658,6 +815,32 @@ class ACPHandlers:
         log.info(f"set_mode: {sid} {old} → {mode_id}")
         return {"sessionId": sid, "modeId": mode_id, "previousModeId": old}
 
+    # ── session/set_config_option ─────────────────────────────────
+    def handle_session_set_config_option(self, params: dict) -> dict:
+        sid = params.get("sessionId", "")
+        config_id = params.get("configId", "")
+        value = params.get("value", "")
+        s = self.sessions.get(sid)
+        if not s:
+            return {"error": f"session not found: {sid}"}
+
+        if config_id == "mode":
+            valid = [m["id"] for m in self.backend.MODES]
+            if value not in valid:
+                return {"error": f"unknown mode: {value}. Valid: {valid}"}
+            s.mode = value
+            log.info(f"config mode: {sid} → {value}")
+        elif config_id == "model":
+            valid = [m["value"] for m in self.backend.MODELS]
+            if value not in valid:
+                return {"error": f"unknown model: {value}. Valid: {valid}"}
+            s.model = value
+            log.info(f"config model: {sid} → {value}")
+        else:
+            return {"error": f"unknown config option: {config_id}"}
+
+        return {"configOptions": self._config_options(s)}
+
     # ── session/list ──────────────────────────────────────────────
     def handle_session_list(self, params: dict) -> dict:
         sessions = self.sessions.list_sessions()
@@ -673,7 +856,7 @@ class ACPHandlers:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info(f"ACP → DeepSeek TUI Adapter v3.5.0")
+    log.info(f"ACP → DeepSeek TUI Adapter v3.6.0")
     log.info(f"  DEEPSEEK_BIN={DEEPSEEK_BIN}")
     log.info(f"  DEEPSEEK_WORKDIR={DEEPSEEK_WORKDIR}")
     log.info("=" * 60)
@@ -687,6 +870,7 @@ def main():
     transport.register("session/load", handlers.handle_session_load)
     transport.register("session/prompt", handlers.handle_session_prompt)
     transport.register("session/set_mode", handlers.handle_session_set_mode)
+    transport.register("session/set_config_option", handlers.handle_session_set_config_option)
     transport.register("session/list", handlers.handle_session_list)
 
     def on_signal(signum, frame):
