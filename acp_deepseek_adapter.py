@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ACP → DeepSeek TUI Adapter  v3.4
+ACP → DeepSeek TUI Adapter  v3.5
 =================================
 Bridges cc-connect's ACP (JSON-RPC 2.0 over stdio) to deepseek-tui.
 
@@ -186,6 +186,7 @@ class DeepSeekBackend:
         self.transport = transport
         self._bin = DEEPSEEK_BIN
         self._tool_counter = 0
+        self._response_chars = 0  # per-execute character counter
 
     # ── Command building ─────────────────────────────────────────
     def _build_command(self, prompt: str, session: Session) -> List[str]:
@@ -312,6 +313,7 @@ class DeepSeekBackend:
         return text
 
     def _emit_text(self, session_id: str, text: str):
+        self._response_chars += len(text) + 1  # +1 for the newline we append
         text = self._sanitize_feishu(text)
         self.transport.send_notification("session/update", {
             "sessionId": session_id,
@@ -323,6 +325,7 @@ class DeepSeekBackend:
 
     def _emit_tool_call_text(self, session_id: str, tool_id: str,
                               name: str, params: str):
+        self._response_chars += len(params)
         self.transport.send_notification("session/update", {
             "sessionId": session_id,
             "update": {
@@ -337,6 +340,7 @@ class DeepSeekBackend:
 
     def _emit_tool_done_text(self, session_id: str, tool_id: str,
                               name: str, result: str):
+        self._response_chars += len(result)
         self.transport.send_notification("session/update", {
             "sessionId": session_id,
             "update": {
@@ -350,6 +354,7 @@ class DeepSeekBackend:
 
     # ── Execution ────────────────────────────────────────────────
     def execute(self, prompt: str, session: Session) -> dict:
+        self._response_chars = 0  # reset per-call counter
         cmd = self._build_command(prompt, session)
         log.info(f"Exec: {' '.join(cmd[:3])}... + prompt ({len(prompt)} chars)")
 
@@ -383,6 +388,15 @@ class DeepSeekBackend:
                 self._emit_text(session.id, f"\n[退出码: {returncode}]\n")
 
             self._discover_thread_id(session)
+
+            # Emit response size indicator
+            est_tokens = max(1, self._response_chars // 2)
+            if est_tokens >= 1000:
+                size_str = f"{est_tokens/1000:.1f}K"
+            else:
+                size_str = str(est_tokens)
+            self._emit_text(session.id, f"[~{size_str} tokens]")
+
             return {"status": "completed", "exitCode": returncode}
 
         except FileNotFoundError:
@@ -533,7 +547,7 @@ class ACPHandlers:
             },
             "serverInfo": {
                 "name": "deepseek-tui-acp-adapter",
-                "version": "3.4.0",
+                "version": "3.5.0",
             },
             "modes": {
                 "availableModes": self.backend.MODES,
@@ -659,7 +673,7 @@ class ACPHandlers:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info(f"ACP → DeepSeek TUI Adapter v3.4.0")
+    log.info(f"ACP → DeepSeek TUI Adapter v3.5.0")
     log.info(f"  DEEPSEEK_BIN={DEEPSEEK_BIN}")
     log.info(f"  DEEPSEEK_WORKDIR={DEEPSEEK_WORKDIR}")
     log.info("=" * 60)
