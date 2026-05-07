@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ACP → DeepSeek TUI Adapter  v3.1
+ACP → DeepSeek TUI Adapter  v3.2
 =================================
 Bridges cc-connect's ACP (JSON-RPC 2.0 over stdio) to deepseek-tui.
 
@@ -297,7 +297,22 @@ class DeepSeekBackend:
         self._tool_counter += 1
         return f"tool_{self._tool_counter}"
 
+    @staticmethod
+    def _sanitize_feishu(text: str) -> str:
+        """Escape leading Markdown that Feishu renders as giant headings."""
+        # Escape # at line start (Feishu H1-H3) with zero-width space
+        if text.lstrip().startswith('#'):
+            # Find the first # and insert a zero-width space before it
+            stripped = text.lstrip()
+            leading = text[:len(text) - len(stripped)]
+            text = leading + '\u200B' + stripped
+        # Escape --- (horizontal rule) → rendered as a thin line in Feishu
+        if text.strip() == '---':
+            text = '\u200B---'
+        return text
+
     def _emit_text(self, session_id: str, text: str):
+        text = self._sanitize_feishu(text)
         self.transport.send_notification("session/update", {
             "sessionId": session_id,
             "update": {
@@ -342,23 +357,11 @@ class DeepSeekBackend:
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,  # deepseek exec outputs tool calls on stderr
                 text=True,
                 cwd=session.work_dir,
                 env={**os.environ, "HOME": os.path.expanduser("~")},
             )
-
-            # Drain stderr separately — log it, don't mix into stdout parsing
-            def _drain_stderr():
-                for line in process.stderr:
-                    line = line.rstrip()
-                    if line:
-                        log.warning(f"[deepseek stderr] {line}")
-
-            stderr_thread = threading.Thread(
-                target=_drain_stderr, daemon=True
-            )
-            stderr_thread.start()
 
             stream_thread = threading.Thread(
                 target=self._stream_output,
@@ -375,12 +378,17 @@ class DeepSeekBackend:
                 return {"status": "timeout", "exitCode": -1}
 
             stream_thread.join(timeout=10)
-            stderr_thread.join(timeout=5)
 
             if returncode != 0:
                 self._emit_text(session.id, f"\n[退出码: {returncode}]\n")
 
             self._discover_thread_id(session)
+
+            # Emit context usage like [ctx: ~X%]
+            ctx_info = self._get_context_usage(session)
+            if ctx_info:
+                self._emit_text(session.id, ctx_info)
+
             return {"status": "completed", "exitCode": returncode}
 
         except FileNotFoundError:
@@ -445,6 +453,31 @@ class DeepSeekBackend:
                         break
             return sessions
 
+    # ── Context usage ────────────────────────────────────────────
+    _CONTEXT_WINDOW_TOKENS = 1_000_000  # deepseek-v4-pro 1M window
+
+    def _get_context_usage(self, session: Session) -> Optional[str]:
+        """Read latest session file and compute approximate context usage %."""
+        sessions_dir = os.path.expanduser("~/.deepseek/sessions")
+        if not os.path.isdir(sessions_dir):
+            return None
+        try:
+            files = [f for f in os.listdir(sessions_dir)
+                     if f.endswith(".json") and not f.startswith(".")]
+            if not files:
+                return None
+            files.sort(key=lambda f: os.path.getmtime(
+                os.path.join(sessions_dir, f)), reverse=True)
+            latest = os.path.join(sessions_dir, files[0])
+            with open(latest, 'r') as fh:
+                data = json.load(fh)
+            total = data.get("metadata", {}).get("total_tokens", 0)
+            pct = min(int(total * 100 / self._CONTEXT_WINDOW_TOKENS), 99)
+            return f"[ctx: ~{pct}%]"
+        except Exception as e:
+            log.debug(f"context usage read failed: {e}")
+            return None
+
     @staticmethod
     def _scan_session_files() -> Optional[str]:
         sessions_dir = os.path.expanduser("~/.deepseek/sessions")
@@ -489,7 +522,7 @@ class ACPHandlers:
             },
             "serverInfo": {
                 "name": "deepseek-tui-acp-adapter",
-                "version": "3.1.0",
+                "version": "3.2.0",
             },
             "modes": {
                 "availableModes": self.backend.MODES,
@@ -602,7 +635,7 @@ class ACPHandlers:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info(f"ACP → DeepSeek TUI Adapter v3.1.0")
+    log.info(f"ACP → DeepSeek TUI Adapter v3.2.0")
     log.info(f"  DEEPSEEK_BIN={DEEPSEEK_BIN}")
     log.info(f"  DEEPSEEK_WORKDIR={DEEPSEEK_WORKDIR}")
     log.info("=" * 60)
