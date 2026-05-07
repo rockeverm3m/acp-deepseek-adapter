@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ACP → DeepSeek TUI Adapter  v3.3
+ACP → DeepSeek TUI Adapter  v3.4
 =================================
 Bridges cc-connect's ACP (JSON-RPC 2.0 over stdio) to deepseek-tui.
 
@@ -383,12 +383,6 @@ class DeepSeekBackend:
                 self._emit_text(session.id, f"\n[退出码: {returncode}]\n")
 
             self._discover_thread_id(session)
-
-            # Emit context usage like [ctx: ~X%]
-            ctx_info = self._get_context_usage(session)
-            if ctx_info:
-                self._emit_text(session.id, ctx_info)
-
             return {"status": "completed", "exitCode": returncode}
 
         except FileNotFoundError:
@@ -453,8 +447,7 @@ class DeepSeekBackend:
                         break
             return sessions
 
-    # ── Context usage ────────────────────────────────────────────
-    _CONTEXT_WINDOW_TOKENS = 1_000_000  # deepseek-v4-pro 1M window
+    # ── Config / compact ─────────────────────────────────────────
     _compact_threshold: Optional[float] = None  # cached from config
 
     @classmethod
@@ -476,8 +469,8 @@ class DeepSeekBackend:
         cls._compact_threshold = 0.5  # default
         return cls._compact_threshold
 
-    def _get_context_usage(self, session: Session) -> Optional[str]:
-        """Read latest session file and compute approximate context usage %."""
+    def _get_session_info(self) -> Optional[dict]:
+        """Read latest session file metadata (for /compact)."""
         sessions_dir = os.path.expanduser("~/.deepseek/sessions")
         if not os.path.isdir(sessions_dir):
             return None
@@ -491,12 +484,9 @@ class DeepSeekBackend:
             latest = os.path.join(sessions_dir, files[0])
             with open(latest, 'r') as fh:
                 data = json.load(fh)
-            total = data.get("metadata", {}).get("total_tokens", 0)
-            pct = min(int(total * 100 / self._CONTEXT_WINDOW_TOKENS), 99)
-            threshold_pct = int(self._read_compact_threshold() * 100)
-            return f"[ctx: ~{pct}% | compact@{threshold_pct}%]"
+            return data.get("metadata", {})
         except Exception as e:
-            log.debug(f"context usage read failed: {e}")
+            log.debug(f"session info read failed: {e}")
             return None
 
     @staticmethod
@@ -543,7 +533,7 @@ class ACPHandlers:
             },
             "serverInfo": {
                 "name": "deepseek-tui-acp-adapter",
-                "version": "3.3.0",
+                "version": "3.4.0",
             },
             "modes": {
                 "availableModes": self.backend.MODES,
@@ -609,12 +599,13 @@ class ACPHandlers:
         # Handle /compact slash command locally (no deepseek exec needed)
         stripped = prompt_text.strip()
         if stripped.startswith('/compact'):
-            ctx_info = self.backend._get_context_usage(s)
             threshold_pct = int(self.backend._read_compact_threshold() * 100)
+            info = self.backend._get_session_info()
+            msg_count = info.get("message_count", "?") if info else "?"
+            title = info.get("title", "?") if info else "?"
             self.backend._emit_text(sid,
-                f"自动压缩已启用 (阈值 {threshold_pct}%)。"
-                f"{ctx_info or ''}\n"
-                f"压缩会在上下文超过 {threshold_pct}% 时自动触发。")
+                f"自动压缩：已启用，阈值 {threshold_pct}%\n"
+                f"当前会话：{title} ({msg_count} 条消息)")
             log.info(f"session/prompt: /compact handled locally")
             return {"stopReason": "end_turn"}
 
@@ -668,7 +659,7 @@ class ACPHandlers:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info(f"ACP → DeepSeek TUI Adapter v3.3.0")
+    log.info(f"ACP → DeepSeek TUI Adapter v3.4.0")
     log.info(f"  DEEPSEEK_BIN={DEEPSEEK_BIN}")
     log.info(f"  DEEPSEEK_WORKDIR={DEEPSEEK_WORKDIR}")
     log.info("=" * 60)
