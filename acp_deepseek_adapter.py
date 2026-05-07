@@ -33,6 +33,8 @@ import logging
 import subprocess
 import signal
 import threading
+import urllib.request
+import urllib.error
 from typing import Optional, Dict, Any, List
 
 # ── Logging ──────────────────────────────────────────────────────────
@@ -187,7 +189,12 @@ class DeepSeekBackend:
     MODELS = [
         {"value": "deepseek-v4-pro",   "name": "V4 Pro",   "description": "最强模型"},
         {"value": "deepseek-v4-flash", "name": "V4 Flash", "description": "快速模型"},
+        {"value": "kimi-for-coding",   "name": "Kimi 2.6", "description": "编码专用"},
     ]
+
+    # Kimi API (Anthropic format, no proxy needed)
+    KIMI_URL = "https://api.kimi.com/coding/v1/messages"
+    KIMI_KEY = "sk-kimi-UF4ZqEZKM5CdRcTMXoK1AbweAfIlyHEzJJU4qGArSc8l0GjVR46GMPaiIe8ga1aj"
 
     def __init__(self, transport: JSONRPCTransport):
         self.transport = transport
@@ -352,6 +359,11 @@ class DeepSeekBackend:
     # ── Execution ────────────────────────────────────────────────
     def execute(self, prompt: str, session: Session) -> dict:
         self._response_chars = 0  # reset per-call counter
+
+        # ── Kimi For Coding path (direct HTTP, no deepseek exec) ──
+        if session.model == "kimi-for-coding":
+            return self._execute_kimi(prompt, session)
+
         cmd = self._build_command(prompt, session)
         log.info(f"Exec: {' '.join(cmd[:3])}... + prompt ({len(prompt)} chars)")
 
@@ -405,6 +417,52 @@ class DeepSeekBackend:
             log.error(f"Execution error: {e}", exc_info=True)
             self._emit_text(session.id, f"\n[错误] {e}\n")
             return {"status": "error", "message": str(e)}
+
+    # ── Kimi direct API call ─────────────────────────────────────
+    def _execute_kimi(self, prompt: str, session: Session) -> dict:
+        """Call Kimi For Coding API directly (Anthropic Messages format)."""
+        payload = {
+            "model": "kimi-for-coding",
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(self.KIMI_URL, data=data, headers={
+            "x-api-key": self.KIMI_KEY,
+            "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                result = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            msg = f"Kimi API error {e.code}: {e.read().decode()[:200]}"
+            log.error(msg)
+            self._emit_text(session.id, f"\n[错误] {msg}\n")
+            return {"status": "error", "message": msg}
+        except Exception as e:
+            log.error(f"Kimi call failed: {e}")
+            self._emit_text(session.id, f"\n[错误] Kimi 调用失败: {e}\n")
+            return {"status": "error", "message": str(e)}
+
+        # Extract text from Anthropic response
+        text = ""
+        for block in result.get("content", []):
+            if block.get("type") == "text":
+                text += block.get("text", "")
+
+        usage = result.get("usage", {})
+        total_tokens = usage.get("total_tokens", 0)
+        log.info(f"Kimi done: {total_tokens} tokens, {len(text)} chars")
+
+        self._emit_text(session.id, text)
+
+        # Emit context
+        est_tokens = self._read_system_tokens() + total_tokens
+        pct = min(est_tokens * 100 // 1_000_000, 99)
+        self._emit_text(session.id, f"[ctx: ~{pct}% | Kimi {total_tokens} tok]")
+
+        return {"status": "completed", "exitCode": 0}
 
     # ── Session discovery ────────────────────────────────────────
     def _discover_thread_id(self, session: Session):
