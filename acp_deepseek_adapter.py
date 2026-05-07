@@ -338,32 +338,16 @@ class DeepSeekBackend:
 
     def _emit_tool_call_text(self, session_id: str, tool_id: str,
                               name: str, params: str):
-        self._response_chars += len(params)
-        self.transport.send_notification("session/update", {
-            "sessionId": session_id,
-            "update": {
-                "sessionUpdate": "tool_call",
-                "toolCallId": tool_id,
-                "title": name,
-                "kind": name,
-                "status": "in_progress",
-                "rawInput": {"params": params},
-            },
-        })
+        # Emit as compact text instead of a Feishu card (avoids giant tool windows)
+        short_params = params[:80] + "…" if len(params) > 80 else params
+        self._emit_text(session_id, f"🔧 {name}: {short_params}")
 
     def _emit_tool_done_text(self, session_id: str, tool_id: str,
                               name: str, result: str):
-        self._response_chars += len(result)
-        self.transport.send_notification("session/update", {
-            "sessionId": session_id,
-            "update": {
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": tool_id,
-                "title": name,
-                "status": "completed",
-                "output": result,
-            },
-        })
+        # Emit result inline as text, not as a card
+        preview = result[:500]
+        more = f"…({len(result)} 字符)" if len(result) > 500 else ""
+        self._emit_text(session_id, f"✅ {name} 完成: {preview}{more}")
 
     # ── Execution ────────────────────────────────────────────────
     def execute(self, prompt: str, session: Session) -> dict:
