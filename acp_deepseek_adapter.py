@@ -403,7 +403,10 @@ class DeepSeekBackend:
             self._discover_thread_id(session)
 
             # Emit context usage estimate [ctx: ~X%]
-            est_tokens = max(1, self._response_chars // 2)
+            # Includes: system prompt (~29K) + user prompt + this response
+            est_tokens = (self._read_system_tokens()
+                          + len(prompt) // 2
+                          + max(0, self._response_chars // 2))
             pct = min(est_tokens * 100 // 1_000_000, 99)
             self._emit_text(session.id, f"[ctx: ~{pct}%]")
 
@@ -473,6 +476,21 @@ class DeepSeekBackend:
 
     # ── Config / compact ─────────────────────────────────────────
     _compact_threshold: Optional[float] = None  # cached from config
+    _system_tokens: Optional[int] = None  # cached system prompt estimate
+
+    @classmethod
+    def _read_system_tokens(cls) -> int:
+        """Estimate system prompt token count from checkpoint (cached)."""
+        if cls._system_tokens is not None:
+            return cls._system_tokens
+        ckpt = os.path.expanduser("~/.deepseek/sessions/checkpoints/latest.json")
+        try:
+            with open(ckpt, 'r') as fh:
+                data = json.load(fh)
+            cls._system_tokens = len(data.get("system_prompt", "")) // 2
+        except Exception:
+            cls._system_tokens = 30000  # fallback ~30K tokens
+        return cls._system_tokens
 
     @classmethod
     def _read_compact_threshold(cls) -> Optional[float]:
