@@ -189,8 +189,9 @@ class DeepSeekBackend:
     MODELS = [
         {"value": "deepseek-v4-pro",   "name": "V4 Pro",   "description": "最强模型"},
         {"value": "deepseek-v4-flash", "name": "V4 Flash", "description": "快速模型"},
-        {"value": "kimi-for-coding",   "name": "Kimi 2.6", "description": "编码专用"},
     ]
+
+    _INTERNAL_MODELS = {"kimi-for-coding"}  # not exposed, auto-selected by agent
 
     # Kimi API (Anthropic format, no proxy needed)
     KIMI_URL = "https://api.kimi.com/coding/v1/messages"
