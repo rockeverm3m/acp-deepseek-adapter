@@ -52,6 +52,9 @@ log = logging.getLogger("acp-adapter")
 # ── Configuration ────────────────────────────────────────────────────
 DEEPSEEK_BIN = os.environ.get("DEEPSEEK_BIN", "/Users/rk/deepseek")
 DEEPSEEK_WORKDIR = os.environ.get("DEEPSEEK_WORKDIR", "/Users/rk")
+HISTORY_DIR = os.environ.get("ADAPTER_HISTORY_DIR",
+    os.path.expanduser("~/.acp-adapter"))
+HISTORY_MAX = 10  # keep last N message pairs
 
 
 # ── JSON-RPC 2.0 Transport ──────────────────────────────────────────
@@ -155,7 +158,28 @@ class Session:
         self.mode = "default"
         self.model = "deepseek-v4-pro"  # default model
         self.dir_history: List[str] = []  # for /dir - (previous dir)
+        self.history: List[dict] = []  # [{"role":"user","content":"..."}, ...]
         self.created_at: float = time.time()
+        self._load_history()
+
+    def _history_file(self) -> str:
+        os.makedirs(HISTORY_DIR, exist_ok=True)
+        return os.path.join(HISTORY_DIR, "feishu_history.json")
+
+    def _load_history(self):
+        try:
+            with open(self._history_file(), 'r') as fh:
+                self.history = json.load(fh)
+            log.info(f"Loaded {len(self.history)} history entries")
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.history = []
+
+    def save_history(self):
+        try:
+            with open(self._history_file(), 'w') as fh:
+                json.dump(self.history[-HISTORY_MAX*2:], fh, ensure_ascii=False)
+        except Exception as e:
+            log.warning(f"History save failed: {e}")
 
 
 class SessionManager:
@@ -202,6 +226,7 @@ class DeepSeekBackend:
         self._bin = DEEPSEEK_BIN
         self._tool_counter = 0
         self._response_chars = 0  # per-execute character counter
+        self._response_text = ""  # accumulated response text
 
     # ── Command building ─────────────────────────────────────────
     def _build_command(self, prompt: str, session: Session) -> List[str]:
@@ -335,6 +360,7 @@ class DeepSeekBackend:
 
     def _emit_text(self, session_id: str, text: str):
         self._response_chars += len(text) + 1  # +1 for the newline we append
+        self._response_text += text + "\n"  # accumulate for history
         text = self._sanitize_feishu(text)
         self.transport.send_notification("session/update", {
             "sessionId": session_id,
@@ -360,6 +386,7 @@ class DeepSeekBackend:
     # ── Execution ────────────────────────────────────────────────
     def execute(self, prompt: str, session: Session) -> dict:
         self._response_chars = 0  # reset per-call counter
+        self._response_text = ""  # reset accumulated text
 
         # ── Kimi For Coding path (direct HTTP, no deepseek exec) ──
         if session.model == "kimi-for-coding":
@@ -841,12 +868,30 @@ class ACPHandlers:
                 self.backend._emit_text(sid, "用法: /memory | /memory add <内容> | /memory set <内容>")
                 return {"stopReason": "end_turn"}
 
-        log.info(f"session/prompt: sid={sid}, len={len(prompt_text)}")
+        # Build prompt with conversation history for continuity
+        full_prompt = prompt_text
+        if s.history:
+            hist_lines = ["[对话历史 — 请记住以下内容以便保持上下文连贯]"]
+            for entry in s.history[-HISTORY_MAX*2:]:
+                role_label = "用户" if entry["role"] == "user" else "DeepSeek"
+                hist_lines.append(f"{role_label}: {entry['content']}")
+            hist_lines.append("[以上为历史记录，下面是最新消息]")
+            full_prompt = "\n".join(hist_lines) + "\n\n" + prompt_text
+
+        log.info(f"session/prompt: sid={sid}, len={len(prompt_text)}, history={len(s.history)}")
 
         # Execute synchronously — execute() blocks until deepseek finishes,
         # streaming session/update notifications for text and tool calls along the way.
         try:
-            result = self.backend.execute(prompt_text, s)
+            result = self.backend.execute(full_prompt, s)
+            # Save to history after successful completion
+            if result.get("status") == "completed":
+                resp_text = self.backend._response_text.strip()
+                if resp_text:
+                    s.history.append({"role": "user", "content": prompt_text})
+                    # Keep only first 500 chars of response to avoid history bloat
+                    s.history.append({"role": "assistant", "content": resp_text[:500]})
+                    s.save_history()
             status = result.get("status", "error")
             if status == "completed":
                 log.info(f"session/prompt done: sid={sid}, stopReason=end_turn")
