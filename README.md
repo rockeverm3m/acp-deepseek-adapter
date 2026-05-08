@@ -1,22 +1,24 @@
-# DeepSeek TUI → cc-connect
+# DeepSeek TUI → 飞书 / 微信 / QQ
 
-Connect [DeepSeek TUI](https://github.com/Hmbown/DeepSeek-TUI) to [cc-connect](https://github.com/cc-connect/cc-connect) via the Agent Client Protocol (ACP). Chat with DeepSeek from Feishu, Lark, Discord, or WeChat — on your phone, no terminal needed.
+通过 cc-connect 把 DeepSeek TUI 接入**飞书、微信、QQ、Discord、Telegram**。手机就是终端。
 
-## Features
+> 本项目由 DeepSeek TUI 自身辅助开发完成——一个不懂代码的小白，在飞书上对话一个通宵就做出来了。
 
-- **Full ACP compliance**: session/prompt → stopReason, command advertisement, configOptions
-- **8 slash commands**: `/dir` `/mode` `/model` `/new` `/list` `/current` `/memory` `/compact`
-- **Context display**: `[ctx: ~2%]` at the end of each reply
-- **Tool calls visible**: see what files DeepSeek reads (📂) and what it returns (✓)
-- **Feishu Markdown sanitization**: no random giant fonts on mobile
-- **Persistent conversation history**: survives adapter restarts
-- **Kimi 2.6 coding backend**: automatically used for code generation (internal, no setup needed)
+## 能做什么
 
-## Quick Start
+- ✅ 手机写代码、切目录、切模型
+- ✅ 8 个斜杠命令：`/dir` `/mode` `/model` `/new` `/list` `/current` `/memory` `/compact`
+- ✅ 每条回复末尾显示 `[ctx: ~2%]` 上下文用量
+- ✅ 工具调用可视化（📂 看读了什么文件）
+- ✅ 飞书 Markdown 防炸字体（`#` 不会变大标题）
+- ✅ 对话历史持久化，重启不失忆
+- ✅ Kimi 2.6 编码后端（内部自动调用，无感）
 
-### 1. Configure cc-connect
+## 快速开始
 
-Add to `~/.cc-connect/config.toml`:
+### 1. 配 cc-connect
+
+在 `~/.cc-connect/config.toml` 里加一个 project：
 
 ```toml
 [[projects]]
@@ -27,57 +29,50 @@ type = "acp"
 
 [projects.agent.options]
 command = "python3"
-args = ["/path/to/acp_deepseek_adapter.py"]
-work_dir = "/path/to/your/project"
+args = ["acp_deepseek_adapter.py"]
+work_dir = "."
 
 [[projects.platforms]]
-type = "feishu"
+type = "feishu"    # 飞书。也可以换成 weixin、qq、discord、telegram
 
 [projects.platforms.options]
-app_id = "your-feishu-app-id"
-app_secret = "your-feishu-app-secret"
+app_id = "你的飞书 App ID"
+app_secret = "你的飞书 App Secret"
 ```
 
-### 2. Environment Variables
+### 2. 环境变量
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DEEPSEEK_BIN` | `~/deepseek` | Path to deepseek binary |
-| `DEEPSEEK_WORKDIR` | `$HOME` | Working directory |
-| `ADAPTER_LOG_FILE` | `/tmp/deepseek-ccconnect.log` | Log file path |
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DEEPSEEK_BIN` | `~/deepseek` | deepseek 二进制路径 |
+| `DEEPSEEK_WORKDIR` | `$HOME` | 工作目录 |
+| `ADAPTER_LOG_FILE` | `/tmp/deepseek-ccconnect.log` | 日志 |
 
-### 3. Start the adapter
+### 3. 启动
 
-cc-connect automatically spawns the adapter. Or run manually:
+cc-connect 自动管理适配器进程，不需要手动启动。装好配置后重启 cc-connect 就行。
 
-```bash
-python3 acp_deepseek_adapter.py
-```
+## 斜杠命令
 
-## Slash Commands
+| 命令 | 说明 |
+|------|------|
+| `/dir <路径>` | 切换工作目录，`/dir -` 返回上一个 |
+| `/mode default\|yolo` | 权限模式切换 |
+| `/model v4-pro\|v4-flash` | DeepSeek 模型切换 |
+| `/new [名称]` | 新建会话 |
+| `/list` | 列出所有会话 |
+| `/current` | 当前会话信息 |
+| `/memory` | 读写 `AGENTS.md` |
+| `/compact` | 查看上下文和压缩状态 |
 
-| Command | Description |
-|---------|-------------|
-| `/dir <path>` | Switch working directory. `/dir -` goes back |
-| `/mode default\|yolo` | Change permission mode |
-| `/model v4-pro\|v4-flash` | Switch DeepSeek model |
-| `/new [name]` | Start a new session |
-| `/list` | List all sessions |
-| `/current` | Show current session info |
-| `/memory` | Read/write `AGENTS.md` |
-| `/compact` | View context usage and compaction status |
+## 聊聊背景
 
-## Project Structure
+DeepSeek TUI 官方已经支持 `deepseek serve --acp`（#782），但工具调用链路还没暴露给 ACP。本项目在官方做完之前，用 `deepseek exec --auto` 自己搭了一套完整的 ACP 桥接。
 
-```
-acp-deepseek-adapter/
-├── acp_deepseek_adapter.py    # The adapter (single file, ~900 lines)
-├── kimi_proxy.py              # Kimi API proxy (optional, no longer needed)
-├── start_kimi_proxy.sh        # Quick-start script for Kimi proxy
-└── README.md
-```
+踩过的坑都记在 [issue #1092](https://github.com/Hmbown/DeepSeek-TUI/issues/1092)。
 
-## Related
+## 相关链接
 
-- [DeepSeek TUI Issue #1092](https://github.com/Hmbown/DeepSeek-TUI/issues/1092) — feature request for native ACP tool_call support
-- [cc-connect](https://github.com/cc-connect/cc-connect) — multi-platform IM bridge for AI agents
+- [适配器仓库](https://github.com/rockeverm3m/acp-deepseek-adapter)
+- [DeepSeek TUI](https://github.com/Hmbown/DeepSeek-TUI)
+- [cc-connect](https://github.com/cc-connect/cc-connect)
