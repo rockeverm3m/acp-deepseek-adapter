@@ -360,7 +360,9 @@ class DeepSeekBackend:
 
     def _emit_text(self, session_id: str, text: str):
         self._response_chars += len(text) + 1  # +1 for the newline we append
-        self._response_text += text + "\n"  # accumulate for history
+        # Only accumulate real content for history (skip tool/text noise)
+        if not text.startswith(('🔧', '✅', '[ctx:', '[退出码:', '[超时]', '[错误]')):
+            self._response_text += text + "\n"
         text = self._sanitize_feishu(text)
         self.transport.send_notification("session/update", {
             "sessionId": session_id,
