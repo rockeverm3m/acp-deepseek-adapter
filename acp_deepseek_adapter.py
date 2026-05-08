@@ -264,79 +264,38 @@ class DeepSeekBackend:
 
     def _stream_output(self, process: subprocess.Popen, session_id: str):
         import re
-        # deepseek exec output formats:
-        #   tool: <name> (<params>)
-        #   tool <name> completed: <inline_result>
-        #   tool <name> completed                 (no colon → multi-line result follows)
         tool_start_pat = re.compile(r"^tool:\s+(\S+)\s*\((.*)\)\s*$")
         tool_done_pat = re.compile(r"^tool\s+(\S+)\s+completed(?::\s*(.*))?\s*$")
-
-        # Track current tool call for matching completion
-        current_tool_id: Optional[str] = None
-        # Multi-line tool result buffering (for "completed" without colon)
-        _result_buf: Optional[list] = None
-        _result_tool_id: Optional[str] = None
-        _result_tool_name: Optional[str] = None
 
         try:
             for line in process.stdout:
                 line = line.rstrip("\n").rstrip("\r")
                 if not line:
-                    # blank line while buffering → keep in result
-                    if _result_buf is not None:
-                        _result_buf.append("")
+                    self._emit_text(session_id, "")
                     continue
-
-                # If we're buffering multi-line tool result
-                if _result_buf is not None:
-                    # Check if this is a new tool call → flush buffer
-                    if tool_start_pat.match(line):
-                        self._emit_tool_done_text(session_id, _result_tool_id,
-                                                  _result_tool_name,
-                                                  "\n".join(_result_buf))
-                        _result_buf = None
-                        _result_tool_id = None
-                        _result_tool_name = None
-                        # fall through to process this tool: line
-                    else:
-                        _result_buf.append(line)
-                        continue
 
                 # Detect tool call start
                 m = tool_start_pat.match(line)
                 if m:
                     tool_name = m.group(1)
                     tool_params = m.group(2)
-                    current_tool_id = self._next_tool_id()
-                    self._emit_tool_call_text(session_id, current_tool_id,
+                    self._emit_tool_call_text(session_id, self._next_tool_id(),
                                               tool_name, tool_params)
                     continue
 
-                # Detect tool completion
+                # Detect tool completion (inline result only; multi-line dropped)
                 m = tool_done_pat.match(line)
                 if m:
                     tool_name = m.group(1)
-                    tool_result = m.group(2)  # None when no colon (multi-line)
-                    tid = current_tool_id or self._next_tool_id()
-                    current_tool_id = None
+                    tool_result = m.group(2)
                     if tool_result is None:
-                        # Enter buffering mode for multi-line tool output
-                        _result_buf = []
-                        _result_tool_id = tid
-                        _result_tool_name = tool_name
-                        continue
-                    self._emit_tool_done_text(session_id, tid,
+                        continue  # multi-line result → skip, let next text flow
+                    self._emit_tool_done_text(session_id, self._next_tool_id(),
                                               tool_name, tool_result)
                     continue
 
                 # Plain text → emit as assistant message chunk
                 self._emit_text(session_id, line)
-
-            # Flush any remaining buffered result
-            if _result_buf is not None:
-                self._emit_tool_done_text(session_id, _result_tool_id,
-                                          _result_tool_name,
-                                          "\n".join(_result_buf))
         except Exception as e:
             log.error(f"Stream error: {e}")
 
