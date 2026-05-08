@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-DeepSeek TUI → 飞书/微信/QQ  v3.8
-====================================
-通过 cc-connect ACP 协议，把 DeepSeek TUI 接入飞书、微信、QQ、Discord、Telegram。
-手机就是终端，不用开电脑也能写代码。
+acp-deepseek-adapter  v3.8
+============================
+Bridge DeepSeek TUI to cc-connect (Feishu/WeChat/QQ/Discord/Telegram) via ACP.
+通过 cc-connect ACP 协议把 DeepSeek TUI 接入飞书、微信、QQ 等 IM 平台。
 
-仓库: https://github.com/rockeverm3m/acp-deepseek-adapter
-反馈: https://github.com/Hmbown/DeepSeek-TUI/issues/1092
+Repo:    https://github.com/rockeverm3m/acp-deepseek-adapter
+Issue:   https://github.com/Hmbown/DeepSeek-TUI/issues/1092
 
-支持: deepseek exec (agent 模式)、工具调用可视、8 个斜杠命令、
-      Kimi 2.6 编码后端、对话历史持久化、飞书 Markdown 防炸字体、
-      上下文用量显示 [ctx: ~X%]
+Supports: deepseek exec (agent mode), tool call passthrough, 8 slash commands,
+          Kimi 2.6 backend, persistent history, Feishu Markdown sanitization,
+          context usage display [ctx: ~X%].
 
-用法:
+Usage / 用法:
     python3 acp_deepseek_adapter.py
 
-环境变量:
-    DEEPSEEK_BIN        deepseek 二进制路径  (默认: ~/deepseek)
-    DEEPSEEK_WORKDIR    工作目录            (默认: $HOME)
-    ADAPTER_LOG_FILE    日志文件            (默认: /tmp/deepseek-ccconnect.log)
+Environment / 环境变量:
+    DEEPSEEK_BIN        path to deepseek binary  (default: ~/deepseek)
+    DEEPSEEK_WORKDIR    working directory        (default: $HOME)
+    ADAPTER_LOG_FILE    log file path            (default: /tmp/deepseek-ccconnect.log)
 """
 
 import json

@@ -1,23 +1,33 @@
-# DeepSeek TUI → 飞书 / 微信 / QQ
+# acp-deepseek-adapter
 
-通过 cc-connect 把 DeepSeek TUI 接入**飞书、微信、QQ、Discord、Telegram**。手机就是终端。
+Bridge DeepSeek TUI to cc-connect via ACP — chat with DeepSeek from **Feishu, WeChat, QQ, Discord, Telegram**.  
+通过 cc-connect ACP 协议把 DeepSeek TUI 接入**飞书、微信、QQ、Discord、Telegram**，手机就是终端。
 
+> Built by talking to DeepSeek TUI through Feishu, overnight, by someone who doesn't code.  
 > 本项目由 DeepSeek TUI 自身辅助开发完成——一个不懂代码的小白，在飞书上对话一个通宵就做出来了。
 
-## 能做什么
+## Features / 功能
 
-- ✅ 手机写代码、切目录、切模型
-- ✅ 8 个斜杠命令：`/dir` `/mode` `/model` `/new` `/list` `/current` `/memory` `/compact`
-- ✅ 每条回复末尾显示 `[ctx: ~2%]` 上下文用量
-- ✅ 工具调用可视化（📂 看读了什么文件）
-- ✅ 飞书 Markdown 防炸字体（`#` 不会变大标题）
-- ✅ 对话历史持久化，重启不失忆
-- ✅ Kimi 2.6 编码后端（内部自动调用，无感）
+- Full ACP protocol: session/prompt → stopReason, command advertisement, configOptions  
+  完整 ACP 协议兼容
+- 8 slash commands: `/dir` `/mode` `/model` `/new` `/list` `/current` `/memory` `/compact`  
+  8 个斜杠命令
+- `[ctx: ~2%]` context usage at end of each reply  
+  每条回复末尾显示上下文用量
+- Visible tool calls: 📂 shows what files are read, ✓ shows results  
+  工具调用可视化
+- Feishu Markdown sanitization — no random giant headings on mobile  
+  飞书 Markdown 防炸字体
+- Persistent conversation history across adapter restarts  
+  对话历史持久化，重启不失忆
+- Kimi 2.6 coding backend (auto-selected internally, zero setup)  
+  Kimi 2.6 编码后端内部自动调用
 
-## 快速开始
+## Quick Start / 快速开始
 
-### 1. 配 cc-connect
+### 1. Configure cc-connect / 配 cc-connect
 
+Add a project to `~/.cc-connect/config.toml`:  
 在 `~/.cc-connect/config.toml` 里加一个 project：
 
 ```toml
@@ -33,46 +43,49 @@ args = ["acp_deepseek_adapter.py"]
 work_dir = "."
 
 [[projects.platforms]]
-type = "feishu"    # 飞书。也可以换成 weixin、qq、discord、telegram
+type = "feishu"    # also: weixin, qq, discord, telegram / 也支持微信、QQ
 
 [projects.platforms.options]
-app_id = "你的飞书 App ID"
-app_secret = "你的飞书 App Secret"
+app_id = "your-feishu-app-id"
+app_secret = "your-feishu-app-secret"
 ```
 
-### 2. 环境变量
+### 2. Environment / 环境变量
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `DEEPSEEK_BIN` | `~/deepseek` | deepseek 二进制路径 |
-| `DEEPSEEK_WORKDIR` | `$HOME` | 工作目录 |
-| `ADAPTER_LOG_FILE` | `/tmp/deepseek-ccconnect.log` | 日志 |
+| Variable / 变量 | Default / 默认 | Description / 说明 |
+|-----------------|----------------|---------------------|
+| `DEEPSEEK_BIN` | `~/deepseek` | Path to deepseek binary |
+| `DEEPSEEK_WORKDIR` | `$HOME` | Working directory |
+| `ADAPTER_LOG_FILE` | `/tmp/deepseek-ccconnect.log` | Log file path |
 
-### 3. 启动
+### 3. Start / 启动
 
-cc-connect 自动管理适配器进程，不需要手动启动。装好配置后重启 cc-connect 就行。
+cc-connect manages the adapter process automatically. Restart cc-connect after config changes.  
+cc-connect 自动管理适配器进程，改完配置重启即可。
 
-## 斜杠命令
+## Slash Commands / 斜杠命令
 
-| 命令 | 说明 |
-|------|------|
-| `/dir <路径>` | 切换工作目录，`/dir -` 返回上一个 |
-| `/mode default\|yolo` | 权限模式切换 |
-| `/model v4-pro\|v4-flash` | DeepSeek 模型切换 |
-| `/new [名称]` | 新建会话 |
-| `/list` | 列出所有会话 |
-| `/current` | 当前会话信息 |
-| `/memory` | 读写 `AGENTS.md` |
-| `/compact` | 查看上下文和压缩状态 |
+| Command / 命令 | Description / 说明 |
+|----------------|---------------------|
+| `/dir <path>` | Switch working directory. `/dir -` goes back / 切换工作目录 |
+| `/mode default\|yolo` | Change permission mode / 权限模式 |
+| `/model v4-pro\|v4-flash` | Switch DeepSeek model / 模型切换 |
+| `/new [name]` | New session / 新建会话 |
+| `/list` | List sessions / 列出会话 |
+| `/current` | Current session info / 当前会话 |
+| `/memory` | Read/write AGENTS.md / 读写记忆文件 |
+| `/compact` | Context usage & compaction status / 上下文压缩 |
 
-## 聊聊背景
+## Background / 背景
 
-DeepSeek TUI 官方已经支持 `deepseek serve --acp`（#782），但工具调用链路还没暴露给 ACP。本项目在官方做完之前，用 `deepseek exec --auto` 自己搭了一套完整的 ACP 桥接。
+DeepSeek TUI already supports `deepseek serve --acp` (issue #782), but the tool_call notification pipeline isn't exposed yet. This adapter bridges that gap using `deepseek exec --auto` until native support lands.  
+DeepSeek TUI 官方已支持 `serve --acp`，但工具调用链路还没暴露。本项目在官方做完之前，用 `deepseek exec --auto` 自己搭了一套完整的 ACP 桥接。
 
-踩过的坑都记在 [issue #1092](https://github.com/Hmbown/DeepSeek-TUI/issues/1092)。
+All pitfalls documented in [issue #1092](https://github.com/Hmbown/DeepSeek-TUI/issues/1092).  
+踩过的坑都记在 issue #1092。
 
-## 相关链接
+## Links / 链接
 
-- [适配器仓库](https://github.com/rockeverm3m/acp-deepseek-adapter)
+- [adapter repo / 适配器仓库](https://github.com/rockeverm3m/acp-deepseek-adapter)
 - [DeepSeek TUI](https://github.com/Hmbown/DeepSeek-TUI)
 - [cc-connect](https://github.com/cc-connect/cc-connect)
