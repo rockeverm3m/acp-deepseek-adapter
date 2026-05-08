@@ -1,26 +1,24 @@
 #!/usr/bin/env python3
 """
-ACP → DeepSeek TUI Adapter  v3.6
-=================================
-Bridges cc-connect's ACP (JSON-RPC 2.0 over stdio) to deepseek-tui.
+DeepSeek TUI → cc-connect ACP Adapter  v3.8
+============================================
+Connect DeepSeek TUI to cc-connect (Feishu/Lark/Discord/WeChat) via ACP.
 
-Verified against:
-  - deepseek-tui v0.8.16 (2026-05-08)
-  - ACP spec: session/prompt deferred response with stopReason
-  - deepseek exec "prompt"              → agent mode with tools (read_file, exec_shell, etc.)
-  - deepseek exec --auto "prompt"       → agent mode + auto-approve all tools
-  - deepseek exec --json "prompt"       → one-shot mode, NO tools (do NOT use)
-  - deepseek sessions                   → list sessions
-  - deepseek thread resume <id>         → resume session
-  - Output: plain text with "tool: <name> (<params>)" and "tool <name> completed: <result>"
+Quick links:
+  GitHub: https://github.com/rockeverm3m/acp-deepseek-adapter
+  Issue:  https://github.com/Hmbown/DeepSeek-TUI/issues/1092
+
+Supports: deepseek exec (agent mode), tool call passthrough, 8 slash commands,
+          Kimi 2.6 coding backend, persistent conversation history, Feishu
+          Markdown sanitization, context usage display.
 
 Usage:
-    python3 acp_deepseek_adapter.py
+    python3 deepseek_ccconnect.py
 
 Environment variables:
-    DEEPSEEK_BIN        Path to deepseek binary  (default: /Users/rk/deepseek)
-    DEEPSEEK_WORKDIR    Working directory        (default: /Users/rk)
-    ADAPTER_LOG_FILE    Log file path            (default: /tmp/acp-deepseek-adapter.log)
+    DEEPSEEK_BIN        Path to deepseek binary  (default: ~/deepseek)
+    DEEPSEEK_WORKDIR    Working directory        (default: $HOME)
+    ADAPTER_LOG_FILE    Log file path            (default: /tmp/deepseek-ccconnect.log)
 """
 
 import json
@@ -38,7 +36,7 @@ import urllib.error
 from typing import Optional, Dict, Any, List
 
 # ── Logging ──────────────────────────────────────────────────────────
-LOG_FILE = os.environ.get("ADAPTER_LOG_FILE", "/tmp/acp-deepseek-adapter.log")
+LOG_FILE = os.environ.get("ADAPTER_LOG_FILE", "/tmp/deepseek-ccconnect.log")
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -50,8 +48,10 @@ logging.basicConfig(
 log = logging.getLogger("acp-adapter")
 
 # ── Configuration ────────────────────────────────────────────────────
-DEEPSEEK_BIN = os.environ.get("DEEPSEEK_BIN", "/Users/rk/deepseek")
-DEEPSEEK_WORKDIR = os.environ.get("DEEPSEEK_WORKDIR", "/Users/rk")
+DEEPSEEK_BIN = os.environ.get("DEEPSEEK_BIN",
+    os.path.expanduser("~/deepseek"))
+DEEPSEEK_WORKDIR = os.environ.get("DEEPSEEK_WORKDIR",
+    os.path.expanduser("~"))
 HISTORY_DIR = os.environ.get("ADAPTER_HISTORY_DIR",
     os.path.expanduser("~/.acp-adapter"))
 HISTORY_MAX = 10  # keep last N message pairs
@@ -632,8 +632,8 @@ class ACPHandlers:
                 "sessionCapabilities": {"list": True},
             },
             "serverInfo": {
-                "name": "deepseek-tui-acp-adapter",
-                "version": "3.6.0",
+                "name": "deepseek-ccconnect",
+                "version": "3.8.0",
             },
             "modes": {
                 "availableModes": self.backend.MODES,
@@ -921,7 +921,7 @@ class ACPHandlers:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info(f"ACP → DeepSeek TUI Adapter v3.6.0")
+    log.info(f"DeepSeek TUI → cc-connect  v3.8.0")
     log.info(f"  DEEPSEEK_BIN={DEEPSEEK_BIN}")
     log.info(f"  DEEPSEEK_WORKDIR={DEEPSEEK_WORKDIR}")
     log.info("=" * 60)

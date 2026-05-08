@@ -1,57 +1,38 @@
-# cc-connect 配置 — deepseek-tui 接入
+# cc-connect config — DeepSeek TUI integration
 #
-# 将此文件合并到你现有的 ~/.cc-connect/config.toml
-# 在 [[projects]] 数组里新增一个 project，或替换现有 project
+# Merge into your existing ~/.cc-connect/config.toml
 #
-# 启动步骤:
-#   1. 确保适配器脚本有执行权限: chmod +x /Users/rk/Developer/acp-deepseek-adapter/acp_deepseek_adapter.py
-#   2. 运行 cc-connect: cc-connect
-#   3. 在飞书/微信里发消息给对应的 bot
+# Setup:
+#   1. Make adapter executable: chmod +x acp_deepseek_adapter.py
+#   2. Run: cc-connect
+#   3. Chat with the bot in Feishu/WeChat/Discord
 
 language = "zh"
 
 [[projects]]
-name = "deepseek-tui"
+name = "deepseek"
 
 [projects.auto_compress]
 enabled = true
 max_tokens = 100000
 min_gap_mins = 15
 
-# ── Agent 配置: ACP 协议 ──────────────────────────────────────────
+# ── Agent: ACP protocol ──────────────────────────────────────────
 [projects.agent]
 type = "acp"
 
 [projects.agent.options]
-# 适配器入口 — 用 python3 启动适配脚本
 command = "python3"
-args = ["/Users/rk/Developer/acp-deepseek-adapter/acp_deepseek_adapter.py"]
-work_dir = "/Users/rk"
+args = ["acp_deepseek_adapter.py"]
+work_dir = "."
 
-# 可选: 环境变量覆盖
-# env = { DEEPSEEK_BIN = "/Users/rk/deepseek", DEEPSEEK_WORKDIR = "/Users/rk" }
-# display_name = "DeepSeek 交易员"
+# Optional: environment variable overrides
+# env = { DEEPSEEK_BIN = "~/deepseek", DEEPSEEK_WORKDIR = "~/my-project" }
 
-# 工作目录 (agent 在此目录下执行)
-# work_dir 已通过 agent.options 设置
-
-# ── 平台: 飞书 ────────────────────────────────────────────────────
+# ── Platform: Feishu ─────────────────────────────────────────────
 [[projects.platforms]]
 type = "feishu"
 
 [projects.platforms.options]
-# 使用你已有的飞书 App (与现有 cc-connect 配置共用)
-app_id = "cli_a97664a09cb8dbc1"
-app_secret = "3E7NGa9SkSBo86WerbUJ4hlGJynfnAtk"
-
-# ── 可选: 微信 (个人版) ─────────────────────────────────────────
-# [[projects.platforms]]
-# type = "weixin"
-# [projects.platforms.options]
-# ... 微信 ilink 配置见 cc-connect 文档 docs/weixin.md
-
-# ── 可选: Telegram ──────────────────────────────────────────────
-# [[projects.platforms]]
-# type = "telegram"
-# [projects.platforms.options]
-# bot_token = "YOUR_BOT_TOKEN"
+app_id = "cli_xxxxxxxxxxxx"
+app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxx"
