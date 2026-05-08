@@ -21,6 +21,7 @@ Environment / 环境变量:
     ADAPTER_LOG_FILE    log file path            (default: /tmp/deepseek-ccconnect.log)
 """
 
+import hashlib
 import json
 import os
 import re
@@ -164,7 +165,8 @@ class Session:
 
     def _history_file(self) -> str:
         os.makedirs(HISTORY_DIR, exist_ok=True)
-        return os.path.join(HISTORY_DIR, "feishu_history.json")
+        h = hashlib.sha256(self.work_dir.encode()).hexdigest()[:12]
+        return os.path.join(HISTORY_DIR, f"history_{h}.json")
 
     def _load_history(self):
         try:
