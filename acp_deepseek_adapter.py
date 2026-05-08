@@ -320,7 +320,7 @@ class DeepSeekBackend:
     def _emit_text(self, session_id: str, text: str):
         self._response_chars += len(text) + 1  # +1 for the newline we append
         # Only accumulate real content for history (skip tool/text noise)
-        if not text.startswith(('🔧', '✅', '[ctx:', '[退出码:', '[超时]', '[错误]')):
+        if not text.startswith(('📂', '  ✓', '[ctx:', '[退出码:', '[超时]', '[错误]')):
             self._response_text += text + "\n"
         text = self._sanitize_feishu(text)
         self.transport.send_notification("session/update", {
@@ -333,13 +333,14 @@ class DeepSeekBackend:
 
     def _emit_tool_call_text(self, session_id: str, tool_id: str,
                               name: str, params: str):
-        # Silently count, don't emit — keeps Feishu chat clean
         self._response_chars += len(params)
+        self._emit_text(session_id, f"📂 {name}: {params[:100]}")
 
     def _emit_tool_done_text(self, session_id: str, tool_id: str,
                               name: str, result: str):
-        # Silently count, don't emit
         self._response_chars += len(result)
+        preview = result[:200] + ("…" if len(result) > 200 else "")
+        self._emit_text(session_id, f"  ✓ {preview}")
 
     # ── Execution ────────────────────────────────────────────────
     def execute(self, prompt: str, session: Session) -> dict:
