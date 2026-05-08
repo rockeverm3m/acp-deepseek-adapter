@@ -374,16 +374,13 @@ class DeepSeekBackend:
 
     def _emit_tool_call_text(self, session_id: str, tool_id: str,
                               name: str, params: str):
-        # Emit as compact text instead of a Feishu card (avoids giant tool windows)
-        short_params = params[:80] + "…" if len(params) > 80 else params
-        self._emit_text(session_id, f"🔧 {name}: {short_params}")
+        # Silently count, don't emit — keeps Feishu chat clean
+        self._response_chars += len(params)
 
     def _emit_tool_done_text(self, session_id: str, tool_id: str,
                               name: str, result: str):
-        # Emit result inline as text, not as a card
-        preview = result[:500]
-        more = f"…({len(result)} 字符)" if len(result) > 500 else ""
-        self._emit_text(session_id, f"✅ {name} 完成: {preview}{more}")
+        # Silently count, don't emit
+        self._response_chars += len(result)
 
     # ── Execution ────────────────────────────────────────────────
     def execute(self, prompt: str, session: Session) -> dict:
