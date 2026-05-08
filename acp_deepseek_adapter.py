@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-acp-deepseek-adapter  v3.8
-============================
+DeepSeek TUI ↔ cc-connect  v3.8
+=================================
 Bridge DeepSeek TUI to cc-connect (Feishu/WeChat/QQ/Discord/Telegram) via ACP.
 通过 cc-connect ACP 协议把 DeepSeek TUI 接入飞书、微信、QQ 等 IM 平台。
 

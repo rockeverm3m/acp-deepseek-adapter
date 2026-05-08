@@ -1,4 +1,4 @@
-# acp-deepseek-adapter
+# DeepSeek TUI ↔ cc-connect
 
 Bridge DeepSeek TUI to cc-connect via ACP — chat with DeepSeek from **Feishu, WeChat, QQ, Discord, Telegram**.  
 通过 cc-connect ACP 协议把 DeepSeek TUI 接入**飞书、微信、QQ、Discord、Telegram**，手机就是终端。
@@ -6,22 +6,21 @@ Bridge DeepSeek TUI to cc-connect via ACP — chat with DeepSeek from **Feishu, 
 > Built by talking to DeepSeek TUI through Feishu, overnight, by someone who doesn't code.  
 > 本项目由 DeepSeek TUI 自身辅助开发完成——一个不懂代码的小白，在飞书上对话一个通宵就做出来了。
 
-## Features / 功能
+## Slash Commands / 斜杠命令
 
-- Full ACP protocol: session/prompt → stopReason, command advertisement, configOptions  
-  完整 ACP 协议兼容
-- 8 slash commands: `/dir` `/mode` `/model` `/new` `/list` `/current` `/memory` `/compact`  
-  8 个斜杠命令
-- `[ctx: ~2%]` context usage at end of each reply  
-  每条回复末尾显示上下文用量
-- Visible tool calls: 📂 shows what files are read, ✓ shows results  
-  工具调用可视化
-- Feishu Markdown sanitization — no random giant headings on mobile  
-  飞书 Markdown 防炸字体
-- Persistent conversation history across adapter restarts  
-  对话历史持久化，重启不失忆
-- Kimi 2.6 coding backend (auto-selected internally, zero setup)  
-  Kimi 2.6 编码后端内部自动调用
+| Command | Description |
+|---------|-------------|
+| `/dir <path>` | Switch working directory. `/dir -` goes back / 切换工作目录 |
+| `/mode default\|yolo` | Change permission mode / 权限模式切换 |
+| `/model v4-pro\|v4-flash` | Switch DeepSeek model / 模型切换 |
+| `/new [name]` | New session / 新建会话 |
+| `/list` | List sessions / 列出会话 |
+| `/current` | Current session info / 当前会话 |
+| `/memory` | Read/write AGENTS.md / 读写记忆文件 |
+| `/compact` | Context usage & compaction status / 上下文压缩 |
+
+Also: `[ctx: ~X%]` context display, visible tool calls, Feishu Markdown sanitization, persistent history.  
+另有：上下文用量显示、工具调用可视、飞书 Markdown 防炸字体、对话历史持久化。
 
 ## Quick Start / 快速开始
 
@@ -52,29 +51,16 @@ app_secret = "your-feishu-app-secret"
 
 ### 2. Environment / 环境变量
 
-| Variable / 变量 | Default / 默认 | Description / 说明 |
-|-----------------|----------------|---------------------|
-| `DEEPSEEK_BIN` | `~/deepseek` | Path to deepseek binary |
-| `DEEPSEEK_WORKDIR` | `$HOME` | Working directory |
-| `ADAPTER_LOG_FILE` | `/tmp/deepseek-ccconnect.log` | Log file path |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEEPSEEK_BIN` | `~/deepseek` | Path to deepseek binary / 二进制路径 |
+| `DEEPSEEK_WORKDIR` | `$HOME` | Working directory / 工作目录 |
+| `ADAPTER_LOG_FILE` | `/tmp/deepseek-ccconnect.log` | Log file path / 日志 |
 
 ### 3. Start / 启动
 
 cc-connect manages the adapter process automatically. Restart cc-connect after config changes.  
 cc-connect 自动管理适配器进程，改完配置重启即可。
-
-## Slash Commands / 斜杠命令
-
-| Command / 命令 | Description / 说明 |
-|----------------|---------------------|
-| `/dir <path>` | Switch working directory. `/dir -` goes back / 切换工作目录 |
-| `/mode default\|yolo` | Change permission mode / 权限模式 |
-| `/model v4-pro\|v4-flash` | Switch DeepSeek model / 模型切换 |
-| `/new [name]` | New session / 新建会话 |
-| `/list` | List sessions / 列出会话 |
-| `/current` | Current session info / 当前会话 |
-| `/memory` | Read/write AGENTS.md / 读写记忆文件 |
-| `/compact` | Context usage & compaction status / 上下文压缩 |
 
 ## Background / 背景
 
