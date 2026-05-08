@@ -164,9 +164,10 @@ class Session:
         self._load_history()
 
     def _history_file(self) -> str:
-        os.makedirs(HISTORY_DIR, exist_ok=True)
-        h = hashlib.sha256(self.work_dir.encode()).hexdigest()[:12]
-        return os.path.join(HISTORY_DIR, f"history_{h}.json")
+        # Store per-project: <work_dir>/.deepseek-adapter/history.json
+        hist_dir = os.path.join(self.work_dir, ".deepseek-adapter")
+        os.makedirs(hist_dir, exist_ok=True)
+        return os.path.join(hist_dir, "history.json")
 
     def _load_history(self):
         try:
