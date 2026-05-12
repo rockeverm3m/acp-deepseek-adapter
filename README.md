@@ -72,6 +72,9 @@ All pitfalls documented in [issue #1092](https://github.com/Hmbown/DeepSeek-TUI/
 
 ## Changelog / 更新日志
 
+### v3.9.1
+- **Auto-compress**: cc-connect 项目配置加入 `auto_compress`，上下文达 100k token 自动触发压缩（15 分钟间隔），与终端设置同步
+
 ### v3.9.0
 - **Streaming output**: 输出分段缓冲，首段即时响应，后续内容合并为 2-3 段，减少 IM 消息碎片
 - **Section separators**: 段落间插入 `---` 分隔线，飞书渲染为可见分段

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DeepSeek TUI ↔ cc-connect  v3.9.0
+DeepSeek TUI ↔ cc-connect  v3.9.1
 =================================
 Bridge DeepSeek TUI to cc-connect (Feishu/WeChat/QQ/Discord/Telegram) via ACP.
 通过 cc-connect ACP 协议把 DeepSeek TUI 接入飞书、微信、QQ 等 IM 平台。
@@ -1047,7 +1047,7 @@ class ACPHandlers:
             },
             "serverInfo": {
                 "name": "deepseek-ccconnect",
-                "version": "3.9.0",
+                "version": "3.9.1",
             },
             "modes": {
                 "availableModes": self.backend.MODES,
@@ -1335,7 +1335,7 @@ class ACPHandlers:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info(f"DeepSeek TUI → cc-connect  v3.9.0")
+    log.info(f"DeepSeek TUI → cc-connect  v3.9.1")
     log.info(f"  DEEPSEEK_BIN={DEEPSEEK_BIN}")
     log.info(f"  DEEPSEEK_WORKDIR={DEEPSEEK_WORKDIR}")
     log.info("=" * 60)
