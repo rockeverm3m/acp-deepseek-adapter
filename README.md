@@ -6,6 +6,8 @@ Bridge DeepSeek TUI to cc-connect via ACP — chat with DeepSeek from **Feishu, 
 > Built by talking to DeepSeek TUI through Feishu, overnight, by someone who doesn't code.  
 > 本项目由 DeepSeek TUI 自身辅助开发完成。
 
+![screenshot](screenshot.png)
+
 ## Slash Commands / 斜杠命令
 
 | Command | Description |
