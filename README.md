@@ -4,7 +4,7 @@ Bridge DeepSeek TUI to cc-connect via ACP — chat with DeepSeek from **Feishu, 
 通过 cc-connect ACP 协议把 DeepSeek TUI 接入**飞书、微信、QQ、Discord、Telegram**，手机就是终端。
 
 > Built by talking to DeepSeek TUI through Feishu, overnight, by someone who doesn't code.  
-> 本项目由 DeepSeek TUI 自身辅助开发完成——一个不懂代码的小白，在飞书上对话一个通宵就做出来了。
+> 本项目由 DeepSeek TUI 自身辅助开发完成。
 
 ## Slash Commands / 斜杠命令
 
