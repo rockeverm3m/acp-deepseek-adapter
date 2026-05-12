@@ -70,6 +70,17 @@ DeepSeek TUI 官方已支持 `serve --acp`，但工具调用链路还没暴露�
 All pitfalls documented in [issue #1092](https://github.com/Hmbown/DeepSeek-TUI/issues/1092).  
 踩过的坑都记在 issue #1092。
 
+## Changelog / 更新日志
+
+### v3.9.0
+- **Streaming output**: 输出分段缓冲，首段即时响应，后续内容合并为 2-3 段，减少 IM 消息碎片
+- **Section separators**: 段落间插入 `---` 分隔线，飞书渲染为可见分段
+- **Triple-layer filter**: 三层过滤体系（正则 + 工具深度 + CJK 字符检测），彻底拦截源代码/diff/shell/git log 泄漏
+- **CJK purity filter**: 工具调用后，不含中文字符的行自动丢弃，杜绝英文代码穿透
+- **History cleanup**: 防污染机制，已知泄漏模式不存入对话历史，切断自循环
+- **Footer**: 恢复 `[ctx: ~X%]` 上下文用量显示
+- **Regex expansion**: 新增 shebang、git status short、git log、grep -n 等 10+ 条过滤规则
+
 ## Links / 链接
 
 - [adapter repo / 适配器仓库](https://github.com/rockeverm3m/acp-deepseek-adapter)

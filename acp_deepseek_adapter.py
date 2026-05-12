@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DeepSeek TUI ↔ cc-connect  v3.8
+DeepSeek TUI ↔ cc-connect  v3.9.0
 =================================
 Bridge DeepSeek TUI to cc-connect (Feishu/WeChat/QQ/Discord/Telegram) via ACP.
 通过 cc-connect ACP 协议把 DeepSeek TUI 接入飞书、微信、QQ 等 IM 平台。
@@ -16,9 +16,11 @@ Usage / 用法:
     python3 acp_deepseek_adapter.py
 
 Environment / 环境变量:
-    DEEPSEEK_BIN        path to deepseek binary  (default: ~/deepseek)
-    DEEPSEEK_WORKDIR    working directory        (default: $HOME)
-    ADAPTER_LOG_FILE    log file path            (default: /tmp/deepseek-ccconnect.log)
+    DEEPSEEK_BIN             path to deepseek binary  (default: ~/deepseek)
+    DEEPSEEK_WORKDIR         working directory        (default: $HOME)
+    ADAPTER_LOG_FILE         log file path            (default: /tmp/deepseek-ccconnect.log)
+    ADAPTER_STRIP_THINKING   strip thinking tokens    (default: 1, set 0 to disable)
+    ADAPTER_HIDE_TOOLS       hide tool call output     (default: 1, set 0 for debug)
 """
 
 import hashlib
@@ -56,6 +58,17 @@ DEEPSEEK_WORKDIR = os.environ.get("DEEPSEEK_WORKDIR",
 HISTORY_DIR = os.environ.get("ADAPTER_HISTORY_DIR",
     os.path.expanduser("~/.acp-adapter"))
 HISTORY_MAX = 10  # keep last N message pairs
+
+# ── Thinking filter ──────────────────────────────────────────────
+# Strip DeepSeek V4 thinking tokens from cc-connect output.
+# Set ADAPTER_STRIP_THINKING=0 to disable.
+STRIP_THINKING = os.environ.get("ADAPTER_STRIP_THINKING", "1") not in ("0", "false", "no", "off")
+
+# ── Tool output filter ─────────────────────────────────────────
+# Hide individual tool calls (📂 read_file, ✓ result) from cc-connect IM channels.
+# These internal process lines flood the chat and cause timeout truncation.
+# Set ADAPTER_HIDE_TOOLS=0 to show full tool output (for debugging).
+HIDE_TOOLS = os.environ.get("ADAPTER_HIDE_TOOLS", "1") not in ("0", "false", "no", "off")
 
 
 # ── JSON-RPC 2.0 Transport ──────────────────────────────────────────
@@ -222,7 +235,15 @@ class DeepSeekBackend:
 
     # Kimi API (Anthropic format, no proxy needed)
     KIMI_URL = "https://api.kimi.com/coding/v1/messages"
-    KIMI_KEY = "sk-kimi-UF4ZqEZKM5CdRcTMXoK1AbweAfIlyHEzJJU4qGArSc8l0GjVR46GMPaiIe8ga1aj"
+    KIMI_KEY = os.environ.get("KIMI_API_KEY", "")
+
+    # ── Streaming batch buffer ──────────────────────────────────
+    # Buffer lines per-session and flush as paragraphs to reduce message
+    # fragmentation in IM channels.
+    # Strategy: send first chunk immediately for responsiveness, then
+    # buffer aggressively and flush on paragraph boundaries or thresholds.
+    _BUF_FLUSH_LINES = 20
+    _BUF_FLUSH_CHARS = 800
 
     def __init__(self, transport: JSONRPCTransport):
         self.transport = transport
@@ -230,6 +251,12 @@ class DeepSeekBackend:
         self._tool_counter = 0
         self._response_chars = 0  # per-execute character counter
         self._response_text = ""  # accumulated response text
+        self._tool_depth = 0             # tool call nesting tracker
+        self._any_tool_used = False      # set True on first tool call
+        self._buf: Dict[str, List[str]] = {}    # session_id → lines
+        self._buf_chars: Dict[str, int] = {}    # session_id → char count
+        self._buf_sent_first: Dict[str, bool] = {}  # session_id → first chunk sent
+        self._buf_flush_count: Dict[str, int] = {}  # session_id → flush counter
 
     # ── Command building ─────────────────────────────────────────
     def _build_command(self, prompt: str, session: Session) -> List[str]:
@@ -258,53 +285,345 @@ class DeepSeekBackend:
         return cmd
 
     # ── Output streaming ─────────────────────────────────────────
-    # deepseek exec outputs plain text. Tool calls are marked as:
-    #   tool: <name> (<params>)
-    #   tool <name> completed: <result>
-    # Everything else is assistant text.
+    # deepseek exec streams stdout (preamble/answer) and stderr (tool calls).
+    # See _stream_output docstring for two-pipe strategy.
 
-    _TOOL_START_RE = None  # compiled at class init
+    # Precompiled tool call patterns (used in _process_line)
+    _TOOL_START_RE = re.compile(r"^tool:\s+(\S+)(?:\s*\((.*)\))?\s*$")
+    _TOOL_DONE_RE = re.compile(r"^tool\s+(\S+)\s+completed(?::\s*(.*))?\s*$")
+
+    # ── _STDOUT_TOOL_FILTER_RE ──
+    # Tool call / diff / shell output / test output markers.
+    _STDOUT_TOOL_FILTER_RE = re.compile(
+        r'^(?:'
+        r'tool[:\s]'                     # tool: or tool 
+        r'|---\s'                        # --- a/path
+        r'|\+\+\+\s'                     # +++ b/path
+        r'|diff\s--git\s'               # diff --git a/...
+        r'|index\s[0-9a-f]+'            # index aa6161d..40b6c67
+        r'|---\sstdout|stderr'          # --- stdout/stderr ---
+        r'|===\s[A-Z_]+\s==='            # === SECTION_HEADER ===
+        r'|\bMATCH: |\bOK: |\bFAIL: '    # MATCH: / OK: / FAIL: test output
+        r'|@@\s-\d+'                     # @@ -1,6 +1,6 @@
+        r'|^Author:\s'                   # git log: Author: name <email>
+        r'|^Date:\s'                     # git log: Date: 2026-05-13...
+        r'|^Subject:\s'                  # git log: Subject: commit msg
+        r'|^commit\s[0-9a-f]{8,}'       # git log: commit abc123...
+        r'|^Merge:\s'                    # git log: Merge: abc123 def456
+        r'|^\d+:\s'                      # grep -n: 1347: match
+        r'|^\d+\s+\S+\.py'               # grep_files / wc -l: 1347 file.py
+        r')'
+    )
+
+    # ── _JSON_METADATA_RE (multi-line aware) ──
+    # Catches JSON lines from checklist_write / update_plan / internal TUI.
+    # Matches standalone brackets, JSON key:value, or known internal keys.
+    _JSON_METADATA_RE = re.compile(
+        r'(?:^\s*[{\[][\s,]*$)'          # standalone { or [
+        r'|(?:^\s*[}\]]\s*,?\s*$)'       # standalone } or ]
+        r'|(?:^\s*"[a-z_]+"\s*:)'        # "key": value
+        r'|(?:'
+        r'"(?:items|plan|step|todos|status|id|content|'
+        r'sessionId|update|stopReason|exitCode|sessionUpdate|'
+        r'availableCommands|configOptions)'  # internal keywords
+        r'"'
+        r')'
+    )
+
+    # ── _SOURCE_HEADER_RE ──
+    # Source-code header / README banner / adapter description / table lines,
+    # plus git status short output and shebang / source-code lines.
+    _SOURCE_HEADER_RE = re.compile(
+        r'(?:^""")'                              # docstring opener
+        r'|(?:^={3,}\s*$)'                        # =========== separator
+        r'|(?:^#{1,4}\s)'                         # Markdown headings (banner)
+        r'|(?:^#!)'                               # shebang: #!/usr/bin/env
+        r'|(?:^\s*[MADRCU?][MADRCU? ]?\s+\S)'    # git status short:  M file.py
+        r'|(?:DeepSeek TUI\s*[↔↔]\s*cc-connect)'  # adapter header
+        r'|(?:Bridge DeepSeek TUI to cc-connect)' # README description
+        r'|(?:通过 cc-connect ACP 协议)'            # Chinese adapter description
+        r'|(?:通过 \.\.\.)'                       # truncated Chinese description
+        r'|(?:Repo:\s+https?://github\.com/)'     # Repo: URL line
+        r'|(?:Issue:\s+https?://github\.com/)'    # Issue: URL line
+        r'|(?:Supports:|Usage / 用法:|Environment / 环境变量:)'  # adapter doc
+        r'|(?:^\[?(?:Setup|用法|配置|环境))'          # section headers
+        r'|(?:^\s*\|.*\|.*\|)'                     # Markdown table rows
+    )
+
+    # ── Two-pipe output streamer ────────────────────────────────
+    # stdout: preamble (discarded when tools are used) or Q&A answer
+    # stderr: tool calls + results (forwarded immediately)
+
+    def _is_internal_line(self, line: str) -> bool:
+        """Check if a line looks like internal TUI output, not user-facing text.
+
+        Matches: diff markers, tool prefixes, JSON metadata, source headers.
+        """
+        if self._STDOUT_TOOL_FILTER_RE.match(line):
+            return True
+        if self._JSON_METADATA_RE.match(line):
+            return True
+        if self._SOURCE_HEADER_RE.match(line):
+            return True
+        return False
+
+    def _process_line(self, line: str, session_id: str):
+        """Process a single output line. Detects tool calls, emits text."""
+        m = self._TOOL_START_RE.match(line)
+        if m:
+            self._emit_tool_call_text(session_id, self._next_tool_id(),
+                                      m.group(1), m.group(2))
+            return
+
+        m = self._TOOL_DONE_RE.match(line)
+        if m:
+            if self._tool_depth > 0:
+                self._tool_depth -= 1
+                log.debug(f"Tool depth decrement: {self._tool_depth}")
+            tool_result = m.group(2)
+            if tool_result is None:
+                return
+            self._emit_tool_done_text(session_id, self._next_tool_id(),
+                                      m.group(1), tool_result)
+            return
+
+        # Suppress between tool start/done when HIDE_TOOLS is active.
+        if HIDE_TOOLS and self._tool_depth > 0:
+            log.debug(f"Tool output suppressed (depth={self._tool_depth}): "
+                      f"{line[:80]}")
+            return
+
+        # Phase 2: suppress internal TUI output even outside tool blocks.
+        # Catches diff markers, JSON metadata, and code blocks that leak
+        # between tool calls when the TUI writes non-tool lines to stderr.
+        if HIDE_TOOLS and self._is_internal_line(line):
+            log.debug(f"Internal line suppressed: {line[:80]}")
+            return
+
+        # Phase 3: after tools were used, drop pure-ASCII lines (source
+        # code, diffs, shell output) that slipped past Phase 2.
+        if HIDE_TOOLS and self._any_tool_used and not DeepSeekBackend._has_cjk(line):
+            return
+
+        self._emit_text(session_id, line)
+
+    def _stream_stderr(self, pipe, session_id, tool_used):
+        """Read stderr, emit tool calls immediately, set tool_used flag.
+
+        Also strips thinking tags from stderr lines as a safety net —
+        V4 may emit thinking tokens mixed into tool call output.
+        """
+        try:
+            for raw_line in pipe:
+                line = raw_line.rstrip('\n').rstrip('\r')
+                if not line:
+                    continue
+                if STRIP_THINKING:
+                    line = DeepSeekBackend._strip_thinking_tags(line)
+                    if not line.strip():
+                        continue  # line was entirely thinking
+                if not tool_used[0]:
+                    tool_used[0] = True
+                self._process_line(line, session_id)
+        except Exception as e:
+            log.error(f"Stderr stream error: {e}")
 
     def _stream_output(self, process: subprocess.Popen, session_id: str):
-        import re
-        tool_start_pat = re.compile(r"^tool:\s+(\S+)\s*\((.*)\)\s*$")
-        tool_done_pat = re.compile(r"^tool\s+(\S+)\s+completed(?::\s*(.*))?\s*$")
+        """Two-pipe streaming: buffer stdout, forward stderr immediately.
 
-        try:
-            for line in process.stdout:
-                line = line.rstrip("\n").rstrip("\r")
-                if not line:
-                    self._emit_text(session_id, "")
+        After both pipes close:
+          - stderr had content -> tools were used -> discard stdout preamble
+          - stderr was empty    -> Q&A            -> flush stdout as answer
+        """
+        stdout_lines = []
+        tool_used = [False]  # mutable cross-thread flag
+
+        def read_stdout():
+            try:
+                for raw_line in process.stdout:
+                    line = raw_line.rstrip('\n').rstrip('\r')
+                    stdout_lines.append(line)
+            except Exception as e:
+                log.error(f"Stdout stream error: {e}")
+
+        stderr_thread = threading.Thread(
+            target=self._stream_stderr,
+            args=(process.stderr, session_id, tool_used),
+            daemon=True,
+        )
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+
+        stderr_thread.start()
+        stdout_thread.start()
+
+        stdout_thread.join()
+        stderr_thread.join()
+
+        # ── Strip thinking tokens from stdout ──────────────────
+        # ── Phase 0: tool depth tracking on stdout ─────────────
+        # When HIDE_TOOLS is active and tools were used, suppress stdout
+        # lines between tool: / tool X completed markers — this catches
+        # file contents, shell output, and other tool results that leak
+        # into stdout alongside the thinking preamble.
+        #
+        # This runs before thinking stripping so that tool blocks are
+        # always suppressed regardless of STRIP_THINKING setting.
+        stdout_depth = 0
+        stdout_filtered = []
+        for line in stdout_lines:
+            if not line:
+                stdout_filtered.append(line)
+                continue
+            if HIDE_TOOLS and tool_used[0]:
+                if self._TOOL_START_RE.match(line):
+                    stdout_depth += 1
+                    log.debug(f"Stdout tool start (depth={stdout_depth}): "
+                              f"{line[:80]}")
                     continue
-
-                # Detect tool call start
-                m = tool_start_pat.match(line)
-                if m:
-                    tool_name = m.group(1)
-                    tool_params = m.group(2)
-                    self._emit_tool_call_text(session_id, self._next_tool_id(),
-                                              tool_name, tool_params)
+                if self._TOOL_DONE_RE.match(line):
+                    if stdout_depth > 0:
+                        stdout_depth -= 1
+                    log.debug(f"Stdout tool done (depth={stdout_depth}): "
+                              f"{line[:80]}")
                     continue
-
-                # Detect tool completion (inline result only; multi-line dropped)
-                m = tool_done_pat.match(line)
-                if m:
-                    tool_name = m.group(1)
-                    tool_result = m.group(2)
-                    if tool_result is None:
-                        continue  # multi-line result → skip, let next text flow
-                    self._emit_tool_done_text(session_id, self._next_tool_id(),
-                                              tool_name, tool_result)
+                if stdout_depth > 0:
+                    log.debug(f"Stdout tool suppressed "
+                              f"(depth={stdout_depth}): {line[:80]}")
                     continue
+            stdout_filtered.append(line)
 
-                # Plain text → emit as assistant message chunk
+        # ── Phase 1: strip thinking tokens ─────────────────────
+        if STRIP_THINKING:
+            text = "\n".join(stdout_filtered)
+            prefix_cleaned = DeepSeekBackend._strip_thinking_prefix(text)
+            prefix_stripped = len(text) - len(prefix_cleaned)
+            if prefix_stripped > 0:
+                log.debug(f"Thinking prefix stripped: {prefix_stripped} chars")
+            clean = DeepSeekBackend._strip_thinking_tags(prefix_cleaned)
+            xml_stripped = len(prefix_cleaned) - len(clean)
+            if xml_stripped > 0:
+                log.debug(f"XML thinking stripped: {xml_stripped} chars")
+            total_stripped = len(text) - len(clean)
+            if total_stripped > 0:
+                log.info(f"Thinking filtered: {total_stripped} chars total "
+                         f"(prefix={prefix_stripped}, xml={xml_stripped})")
+            for line in clean.split("\n"):
+                if HIDE_TOOLS and self._is_internal_line(line):
+                    log.debug(f"Stdout internal line suppressed: {line[:80]}")
+                    continue
+                if HIDE_TOOLS and tool_used[0] and not DeepSeekBackend._has_cjk(line):
+                    continue  # drop pure-ASCII lines after tool use
                 self._emit_text(session_id, line)
-        except Exception as e:
-            log.error(f"Stream error: {e}")
+        else:
+            # Light filter: strip English-only thinking preamble even when
+            # ADAPTER_STRIP_THINKING=0. Uses CJK-ratio scan to keep user's
+            # language response while removing internal English narration.
+            text = "\n".join(stdout_filtered)
+            prefix_cleaned = DeepSeekBackend._strip_thinking_prefix(text)
+            stripped = len(text) - len(prefix_cleaned)
+            if stripped > 0:
+                log.info(f"Light prefix stripped: {stripped} chars")
+            for line in prefix_cleaned.split("\n"):
+                if HIDE_TOOLS and self._is_internal_line(line):
+                    log.debug(f"Stdout internal line suppressed: {line[:80]}")
+                    continue
+                if HIDE_TOOLS and tool_used[0] and not DeepSeekBackend._has_cjk(line):
+                    continue  # drop pure-ASCII lines after tool use
+                self._emit_text(session_id, line)
 
     def _next_tool_id(self) -> str:
         self._tool_counter += 1
         return f"tool_{self._tool_counter}"
+
+    # Box-drawing characters used by deepseek in table output
+    _BOX_DRAWING = set('│├└─┬┼┤┌┐┘')
+
+    @staticmethod
+    def _has_cjk(line: str) -> bool:
+        """Return True if line contains at least one CJK character."""
+        for ch in line:
+            if ('\u4e00' <= ch <= '\u9fff'
+                    or '\u3400' <= ch <= '\u4dbf'
+                    or '\u3000' <= ch <= '\u303f'
+                    or '\uff00' <= ch <= '\uffef'):
+                return True
+        return False
+
+    # Precompiled thinking-tag patterns (used in _strip_thinking_tags)
+    _THINKING_TAG_RES = [
+        re.compile(r'<thinking>.*?</thinking>', re.DOTALL),
+        re.compile(r'<思考>.*?</思考>', re.DOTALL),
+        re.compile(r'<reasoning>.*?</reasoning>', re.DOTALL),
+    ]
+
+    @staticmethod
+    def _strip_thinking_tags(text: str) -> str:
+        """Remove DeepSeek V4 thinking tokens (XML-style blocks) from text.
+
+        V4 emits thinking as ContentBlock::Thinking before the final answer.
+        In exec mode these appear as <thinking>/<思考>/<reasoning> XML blocks.
+        This strips them regardless of whether tools are used.
+        """
+        for pat in DeepSeekBackend._THINKING_TAG_RES:
+            text = pat.sub('', text)
+        return text
+
+    @staticmethod
+    def _strip_thinking_prefix(text: str) -> str:
+        """Strip DeepSeek V4 thinking preamble from plain-text stdout.
+
+        V4 emits thinking as plain-text process narration on stdout —
+        internal monologue about files, tools, and analysis before the
+        actual user-facing response. In cc-connect IM channels this
+        floods the chat and causes timeout truncation.
+
+        Strategy: scan backward by paragraph, find the first block with
+        significant CJK content (>30% CJK characters). The thinking is
+        almost always in English (tool names, code references, internal
+        analysis), while the final response is in the user's language.
+        """
+        if not text:
+            return text
+
+        # ── Phase 1: CJK ratio boundary scan (paragraph-level) ──
+        # Split into paragraph runs (1+ blank lines as separator).
+        # Walk backward; the first CJK-heavy block marks the answer start.
+        paragraphs = re.split(r'\n\n+', text)
+        threshold = 0.30  # 30% CJK characters
+
+        for i in range(len(paragraphs) - 1, -1, -1):
+            para = paragraphs[i]
+            if not para.strip():
+                continue
+            # Count CJK characters (U+4E00–U+9FFF, U+3400–U+4DBF,
+            # plus CJK punctuation U+3000–U+303F, U+FF00–U+FFEF)
+            cjk = sum(1 for ch in para
+                      if ('\u4e00' <= ch <= '\u9fff'
+                          or '\u3400' <= ch <= '\u4dbf'
+                          or '\u3000' <= ch <= '\u303f'
+                          or '\uff00' <= ch <= '\uffef'))
+            total = len(para.strip())
+            if total > 0 and cjk / total >= threshold:
+                # Found the answer section — join from here onward
+                return '\n\n'.join(paragraphs[i:])
+
+        # ── Phase 2: fallback — structural boundary heuristics ──
+        # If no CJK-heavy block found (e.g. pure-English answer),
+        # try the old structural patterns.
+        m = re.search(r'\n\n+#{1,4}\s', text)
+        if m:
+            return text[m.start() + 1:]
+
+        m = re.search(r'\n\n+```', text)
+        if m:
+            return text[m.start() + 1:]
+
+        m = re.search(r'\n\n+(?=[-*+]\s|\d+[.)]\s)', text)
+        if m:
+            return text[m.start() + 1:]
+
+        # No boundary found — return as-is
+        return text
 
     @staticmethod
     def _sanitize_feishu(text: str) -> str:
@@ -318,14 +637,28 @@ class DeepSeekBackend:
         # Escape --- (horizontal rule) → rendered as a thin line in Feishu
         if text.strip() == '---':
             text = '\u200B---'
+        # Escape box-drawing table lines — prevent Feishu table rendering
+        if any(ch in DeepSeekBackend._BOX_DRAWING for ch in text):
+            text = '\u200B' + text
         return text
 
-    def _emit_text(self, session_id: str, text: str):
-        self._response_chars += len(text) + 1  # +1 for the newline we append
-        # Only accumulate real content for history (skip tool/text noise)
-        if not text.startswith(('📂', '  ✓', '[ctx:', '[退出码:', '[超时]', '[错误]')):
-            self._response_text += text + "\n"
-        text = self._sanitize_feishu(text)
+    # ── Section separator between flushed chunks ──────────────────
+    # Inserted between buffer flushes to create visible section breaks
+    # in cc-connect's single-message-per-turn output.
+    _SECTION_SEP = "\n\n---\n\n"
+
+    def _flush_buffer(self, session_id: str):
+        """Flush accumulated lines for session_id as a single text chunk."""
+        lines = self._buf.pop(session_id, [])
+        self._buf_chars.pop(session_id, None)
+        if not lines:
+            return
+        text = "\n".join(lines)
+        # Insert section separator between segments (not before first)
+        count = self._buf_flush_count.get(session_id, 0)
+        if count > 0:
+            text = self._SECTION_SEP + text
+        self._buf_flush_count[session_id] = count + 1
         self.transport.send_notification("session/update", {
             "sessionId": session_id,
             "update": {
@@ -333,22 +666,87 @@ class DeepSeekBackend:
                 "content": {"type": "text", "text": text + "\n"},
             },
         })
+        log.debug(f"Buffer flushed: {len(lines)} lines, {len(text)} chars")
+
+    def _emit_text(self, session_id: str, text: str, buffered: bool = True):
+        # Safety net: double-check internal lines at emit level
+        if buffered and HIDE_TOOLS and self._is_internal_line(text):
+            log.debug(f"Emit-level internal suppressed: {text[:80]}")
+            return
+        self._response_chars += len(text) + 1  # +1 for the newline we append
+        # Only accumulate real content for history (skip tool/text noise
+        # and known leak patterns to prevent history contamination)
+        _NOISE_PREFIXES = ('📂', '  ✓', '[ctx:', '[退出码:', '[超时]', '[错误]',
+                           '#!/usr/', '#!/bin/', 'M acp_', 'Author:', 'Date:',
+                           'Subject:', 'commit ', 'Merge:', '通过 ...')
+        if not text.startswith(_NOISE_PREFIXES):
+            self._response_text += text + "\n"
+        text = self._sanitize_feishu(text)
+        if not buffered:
+            # Send immediately (slash commands, errors, ctx line, etc.)
+            self.transport.send_notification("session/update", {
+                "sessionId": session_id,
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": text + "\n"},
+                },
+            })
+            return
+        # First-chunk: send the first non-empty line immediately for instant
+        # feedback. Subsequent content is buffered and flushed as paragraphs.
+        if not self._buf_sent_first.get(session_id):
+            if text.strip():
+                self._buf_sent_first[session_id] = True
+                self.transport.send_notification("session/update", {
+                    "sessionId": session_id,
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": text + "\n"},
+                    },
+                })
+            return
+        # After first chunk: buffer aggressively, flush only on threshold
+        buf = self._buf.setdefault(session_id, [])
+        buf.append(text)
+        n = self._buf_chars[session_id] = self._buf_chars.get(session_id, 0) + len(text)
+        # Flush on: double blank line (real paragraph boundary) or thresholds
+        is_double_blank = (text.strip() == "" and len(buf) >= 2
+                           and buf[-2].strip() == "")
+        if is_double_blank or len(buf) >= self._BUF_FLUSH_LINES or n >= self._BUF_FLUSH_CHARS:
+            self._flush_buffer(session_id)
 
     def _emit_tool_call_text(self, session_id: str, tool_id: str,
                               name: str, params: str):
+        self._tool_depth += 1
+        self._any_tool_used = True
+        log.debug(f"Tool depth increment: {self._tool_depth} ({name})")
         self._response_chars += len(params)
-        self._emit_text(session_id, f"📂 {name}: {params[:100]}")
+        if not HIDE_TOOLS:
+            self._emit_text(session_id, f"📂 {name}: {params[:100]}")
+        else:
+            log.debug(f"Tool hidden: {name}({params[:100]}) "
+                      f"[depth={self._tool_depth}]")
 
     def _emit_tool_done_text(self, session_id: str, tool_id: str,
                               name: str, result: str):
         self._response_chars += len(result)
-        preview = result[:200] + ("…" if len(result) > 200 else "")
-        self._emit_text(session_id, f"  ✓ {preview}")
+        if not HIDE_TOOLS:
+            preview = result[:200] + ("…" if len(result) > 200 else "")
+            self._emit_text(session_id, f"  ✓ {preview}")
+        else:
+            log.debug(f"Tool done hidden: {name}")
 
     # ── Execution ────────────────────────────────────────────────
     def execute(self, prompt: str, session: Session) -> dict:
         self._response_chars = 0  # reset per-call counter
         self._response_text = ""  # reset accumulated text
+        self._tool_depth = 0      # safety reset
+        self._any_tool_used = False
+        # Reset buffer state for this execution
+        self._buf_sent_first.pop(session.id, None)
+        self._buf.pop(session.id, None)
+        self._buf_chars.pop(session.id, None)
+        self._buf_flush_count.pop(session.id, None)
 
         # ── Kimi For Coding path (direct HTTP, no deepseek exec) ──
         if session.model == "kimi-for-coding":
@@ -361,7 +759,7 @@ class DeepSeekBackend:
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,  # deepseek exec outputs tool calls on stderr
+                stderr=subprocess.PIPE,   # tool calls on stderr (processed in parallel)
                 text=True,
                 cwd=session.work_dir,
                 env={**os.environ, "HOME": os.path.expanduser("~")},
@@ -378,39 +776,48 @@ class DeepSeekBackend:
                 returncode = process.wait(timeout=600)
             except subprocess.TimeoutExpired:
                 process.kill()
-                self._emit_text(session.id, "\n[超时] 命令执行超过10分钟，已终止。\n")
+                self._emit_text(session.id, "\n[超时] 命令执行超过10分钟，已终止。\n", buffered=False)
                 return {"status": "timeout", "exitCode": -1}
 
             stream_thread.join(timeout=10)
 
+            # Flush any remaining buffered text
+            self._flush_buffer(session.id)
+
             if returncode != 0:
-                self._emit_text(session.id, f"\n[退出码: {returncode}]\n")
+                self._emit_text(session.id, f"\n[退出码: {returncode}]\n", buffered=False)
 
-            self._discover_thread_id(session)
+            # _discover_thread_id disabled: deepseek exec does not support
+            # --resume (verified v0.8.16), so thread IDs are unused.
+            # Keep the discovery code for potential future exec mode support.
+            # self._discover_thread_id(session)
 
-            # Emit context usage estimate [ctx: ~X%]
-            # Includes: system prompt (~29K) + user prompt + this response
             est_tokens = (self._read_system_tokens()
                           + len(prompt) // 2
                           + max(0, self._response_chars // 2))
             pct = min(est_tokens * 100 // 1_000_000, 99)
-            self._emit_text(session.id, f"[ctx: ~{pct}%]")
+            self._emit_text(session.id, f"[ctx: ~{pct}%]", buffered=False)
 
             return {"status": "completed", "exitCode": returncode}
 
         except FileNotFoundError:
             msg = f"找不到 deepseek-tui: {DEEPSEEK_BIN}"
             log.error(msg)
-            self._emit_text(session.id, f"\n[错误] {msg}\n")
+            self._emit_text(session.id, f"\n[错误] {msg}\n", buffered=False)
             return {"status": "error", "message": msg}
         except Exception as e:
             log.error(f"Execution error: {e}", exc_info=True)
-            self._emit_text(session.id, f"\n[错误] {e}\n")
+            self._emit_text(session.id, f"\n[错误] {e}\n", buffered=False)
             return {"status": "error", "message": str(e)}
 
     # ── Kimi direct API call ─────────────────────────────────────
     def _execute_kimi(self, prompt: str, session: Session) -> dict:
         """Call Kimi For Coding API directly (Anthropic Messages format)."""
+        if not self.KIMI_KEY:
+            msg = "KIMI_API_KEY 环境变量未设置，无法调用 Kimi API"
+            log.error(msg)
+            self._emit_text(session.id, f"\n[错误] {msg}\n", buffered=False)
+            return {"status": "error", "message": msg}
         payload = {
             "model": "kimi-for-coding",
             "max_tokens": 4096,
@@ -426,13 +833,17 @@ class DeepSeekBackend:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 result = json.loads(resp.read())
         except urllib.error.HTTPError as e:
-            msg = f"Kimi API error {e.code}: {e.read().decode()[:200]}"
+            try:
+                body = e.read().decode(errors="replace")[:200]
+            except Exception:
+                body = e.reason or "unknown"
+            msg = f"Kimi API error {e.code}: {body}"
             log.error(msg)
-            self._emit_text(session.id, f"\n[错误] {msg}\n")
+            self._emit_text(session.id, f"\n[错误] {msg}\n", buffered=False)
             return {"status": "error", "message": msg}
         except Exception as e:
             log.error(f"Kimi call failed: {e}")
-            self._emit_text(session.id, f"\n[错误] Kimi 调用失败: {e}\n")
+            self._emit_text(session.id, f"\n[错误] Kimi 调用失败: {e}\n", buffered=False)
             return {"status": "error", "message": str(e)}
 
         # Extract text from Anthropic response
@@ -445,12 +856,12 @@ class DeepSeekBackend:
         total_tokens = usage.get("total_tokens", 0)
         log.info(f"Kimi done: {total_tokens} tokens, {len(text)} chars")
 
-        self._emit_text(session.id, text)
+        self._emit_text(session.id, text, buffered=False)
 
-        # Emit context
+        # Emit context (silent — only logged)
         est_tokens = self._read_system_tokens() + total_tokens
         pct = min(est_tokens * 100 // 1_000_000, 99)
-        self._emit_text(session.id, f"[ctx: ~{pct}% | Kimi {total_tokens} tok]")
+        log.info(f"ctx: ~{pct}% | Kimi {total_tokens} tok (session={session.id})")
 
         return {"status": "completed", "exitCode": 0}
 
@@ -636,7 +1047,7 @@ class ACPHandlers:
             },
             "serverInfo": {
                 "name": "deepseek-ccconnect",
-                "version": "3.8.0",
+                "version": "3.9.0",
             },
             "modes": {
                 "availableModes": self.backend.MODES,
@@ -924,7 +1335,7 @@ class ACPHandlers:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info(f"DeepSeek TUI → cc-connect  v3.8.0")
+    log.info(f"DeepSeek TUI → cc-connect  v3.9.0")
     log.info(f"  DEEPSEEK_BIN={DEEPSEEK_BIN}")
     log.info(f"  DEEPSEEK_WORKDIR={DEEPSEEK_WORKDIR}")
     log.info("=" * 60)
