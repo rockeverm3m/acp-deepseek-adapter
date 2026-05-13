@@ -9,7 +9,7 @@
 ---
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.9.1-blue" alt="version">
+  <img src="https://img.shields.io/badge/version-3.9.2-blue" alt="version">
   <img src="https://img.shields.io/badge/protocol-ACP-green" alt="protocol">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey" alt="platform">
   <img src="https://img.shields.io/badge/license-MIT-brightgreen" alt="license">
@@ -194,6 +194,10 @@ All pitfalls documented in [issue #1092](https://github.com/Hmbown/DeepSeek-TUI/
 踩过的坑都记在 issue #1092。
 
 ## Changelog / 更新日志
+
+### v3.9.2
+- **Code-noise regex v2**: `_CODE_NOISE_RE` 补上 ps 输出、进程命令行泄漏两个关键模式，切断历史污染反馈循环
+- **History repair**: 清理已污染的历史文件条目，防止源码碎片在后续轮次回传
 
 ### v3.9.1
 - **Auto-compress**: cc-connect 项目配置加入 `auto_compress`，上下文达 100k token 自动触发压缩（15 分钟间隔），与终端设置同步

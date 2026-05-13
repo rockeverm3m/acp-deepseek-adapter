@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DeepSeek TUI ↔ cc-connect  v3.9.1
+DeepSeek TUI ↔ cc-connect  v3.9.2
 =================================
 Bridge DeepSeek TUI to cc-connect (Feishu/WeChat/QQ/Discord/Telegram) via ACP.
 通过 cc-connect ACP 协议把 DeepSeek TUI 接入飞书、微信、QQ 等 IM 平台。
@@ -292,6 +292,23 @@ class DeepSeekBackend:
     _TOOL_START_RE = re.compile(r"^tool:\s+(\S+)(?:\s*\((.*)\))?\s*$")
     _TOOL_DONE_RE = re.compile(r"^tool\s+(\S+)\s+completed(?::\s*(.*))?\s*$")
 
+    # ── Code-noise patterns (prevent history contamination) ──
+    # Lines matching these are excluded from _response_text accumulation
+    # to break the feedback loop where leaked code re-enters prompts.
+    _CODE_NOISE_RE = re.compile(
+        r'(?:^\s*(?:self\.\w+\())'          # self.method_name(  — Python method calls
+        r'|(?:^\s*(?:def\s+\w+\s*\())'      # def function_name( — function defs
+        r'|(?:^\s*(?:class\s+\w+))'         # class ClassName     — class defs
+        r'|(?:^\s*(?:import\s+\w+|from\s+\w+\s+import))'  # import/from
+        r'|(?:^\s*@\w+)'                    # @decorator
+        r'|(?:^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2},\d{3}\s+\[)'  # log lines
+        r'|(?:^[drwx-]{10}[@+\s])'          # ls -la output (macOS: @ extended attrs)
+        r'|(?:^@@\s+-\d+,\d+\s+\+\d+,\d+)'  # diff hunk headers
+        r'|(?:^\w+\s+\d+\s+[\d.]+\s+[\d.]+\s+\d+)'  # ps output: user PID %CPU %MEM RSS
+        r'|(?:^\d+\s+\d+\s+\S+\s+\S+\s+s\d+\s+\S+\s+\d+:\d+[上下]午)'  # ps time
+        r'|(?:/Users/\S+/deepseek\s+exec\s+--auto)'  # command line leak
+    )
+
     # ── _STDOUT_TOOL_FILTER_RE ──
     # Tool call / diff / shell output / test output markers.
     _STDOUT_TOOL_FILTER_RE = re.compile(
@@ -369,6 +386,14 @@ class DeepSeekBackend:
 
     def _process_line(self, line: str, session_id: str):
         """Process a single output line. Detects tool calls, emits text."""
+
+        # ── Code-noise catch (stderr only, aggressive) ──────
+        # Blocks Python code, log lines, ls/ps output from reaching
+        # both the cc-connect output stream and the history accumulator.
+        if HIDE_TOOLS and self._CODE_NOISE_RE.search(line):
+            log.debug(f"Code noise suppressed: {line[:80]}")
+            return
+
         m = self._TOOL_START_RE.match(line)
         if m:
             self._emit_tool_call_text(session_id, self._next_tool_id(),
@@ -679,7 +704,8 @@ class DeepSeekBackend:
         _NOISE_PREFIXES = ('📂', '  ✓', '[ctx:', '[退出码:', '[超时]', '[错误]',
                            '#!/usr/', '#!/bin/', 'M acp_', 'Author:', 'Date:',
                            'Subject:', 'commit ', 'Merge:', '通过 ...')
-        if not text.startswith(_NOISE_PREFIXES):
+        if (not text.startswith(_NOISE_PREFIXES)
+                and not self._CODE_NOISE_RE.search(text)):
             self._response_text += text + "\n"
         text = self._sanitize_feishu(text)
         if not buffered:
@@ -1047,7 +1073,7 @@ class ACPHandlers:
             },
             "serverInfo": {
                 "name": "deepseek-ccconnect",
-                "version": "3.9.1",
+                "version": "3.9.2",
             },
             "modes": {
                 "availableModes": self.backend.MODES,
@@ -1335,7 +1361,7 @@ class ACPHandlers:
 # ── Main ─────────────────────────────────────────────────────────────
 def main():
     log.info("=" * 60)
-    log.info(f"DeepSeek TUI → cc-connect  v3.9.1")
+    log.info(f"DeepSeek TUI → cc-connect  v3.9.2")
     log.info(f"  DEEPSEEK_BIN={DEEPSEEK_BIN}")
     log.info(f"  DEEPSEEK_WORKDIR={DEEPSEEK_WORKDIR}")
     log.info("=" * 60)
